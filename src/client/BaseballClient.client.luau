@@ -497,16 +497,35 @@ local function makeButton(parent, name, text, size, position, color)
 	return b
 end
 
+local fades = {} -- [label] = the fade-out tweens still running on it
+
 local function fadeOut(label, seconds)
 	local stroke = label:FindFirstChildOfClass("UIStroke")
 	local info = TweenInfo.new(seconds)
-	TweenService:Create(label, info, { TextTransparency = 1 }):Play()
+	local tweens = { TweenService:Create(label, info, { TextTransparency = 1 }) }
 	if stroke then
-		TweenService:Create(stroke, info, { Transparency = 1 }):Play()
+		table.insert(tweens, TweenService:Create(stroke, info, { Transparency = 1 }))
+	end
+	fades[label] = tweens
+	tweens[1].Completed:Connect(function()
+		if fades[label] == tweens then
+			fades[label] = nil
+		end
+	end)
+	for _, tween in tweens do
+		tween:Play()
 	end
 end
 
 local function fadeIn(label)
+	-- Stop a fade-out that's still going, or it would hide the new text
+	local tweens = fades[label]
+	if tweens then
+		fades[label] = nil
+		for _, tween in tweens do
+			tween:Cancel()
+		end
+	end
 	label.TextTransparency = 0
 	local stroke = label:FindFirstChildOfClass("UIStroke")
 	if stroke then
@@ -799,7 +818,6 @@ list.BackgroundTransparency = 1
 list.BorderSizePixel = 0
 list.ScrollBarThickness = 8
 list.CanvasSize = UDim2.new(0, 0, 0, 0)
-list.AutomaticCanvasSize = Enum.AutomaticSize.Y
 list.Parent = shopFrame
 local grid = Instance.new("UIGridLayout")
 grid.CellSize = UDim2.new(0, 190, 0, 170)
@@ -807,6 +825,15 @@ grid.CellPadding = UDim2.new(0, 10, 0, 10)
 grid.HorizontalAlignment = Enum.HorizontalAlignment.Center
 grid.SortOrder = Enum.SortOrder.LayoutOrder
 grid.Parent = list
+
+-- How far the shop scrolls. Worked out by hand because Roblox's automatic
+-- version gets it wrong when the screen is shrunk for phones.
+local function refreshCanvas()
+	list.CanvasSize = UDim2.new(0, 0, 0, grid.AbsoluteContentSize.Y / math.max(uiScale.Scale, 0.01) + 12)
+end
+grid:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(refreshCanvas)
+uiScale:GetPropertyChangedSignal("Scale"):Connect(refreshCanvas)
+refreshCanvas()
 
 local toastLabel = makeLabel(shopFrame, "Toast", UDim2.new(1, -24, 0, 26), UDim2.new(0.5, 0, 1, -20), nil, 22)
 
@@ -1034,6 +1061,16 @@ local function cameraStep(dt)
 		cf *= CFrame.Angles((math.random() - 0.5) * 0.03, (math.random() - 0.5) * 0.03, 0)
 	end
 	camera.CFrame = cf
+	camera.Focus = CFrame.new(camLook)
+	-- If you were zoomed all the way in, Roblox hid your body. Show it while you bat.
+	local char = player.Character
+	if char then
+		for _, part in char:GetDescendants() do
+			if part:IsA("BasePart") then
+				part.LocalTransparencyModifier = 0
+			end
+		end
+	end
 end
 
 local function setTouchControls(on)
@@ -1317,7 +1354,13 @@ end
 
 local function startSwing(userId)
 	local now = workspace:GetServerTimeNow()
-	swingStates[userId] = { time = now, from = poseFor(userId, now) }
+	local from = table.clone(poseFor(userId, now))
+	-- Right after a swing the bat has come all the way around. Count it from the front again
+	-- so the next swing doesn't spin the bat backward through the batter.
+	if from.batYaw > 180 then
+		from.batYaw -= 360
+	end
+	swingStates[userId] = { time = now, from = from }
 	prepPitches[userId] = nil
 end
 
@@ -1502,7 +1545,7 @@ local function cupPosition(angle)
 	return (m.pivotCF * CFrame.Angles(math.rad(angle), 0, 0)) * Vector3.new(0, m.armLength, m.ballLead)
 end
 
-local cheerParts, cheerHomes, cheerPhases, cheerHops = {}, {}, {}, {}
+local cheerParts, cheerHomes, cheerPhases, cheerHops, cheerMoved = {}, {}, {}, {}, {}
 local cheerUntil = 0
 local cheering = false
 
@@ -1517,14 +1560,20 @@ local function startCheer(seconds, landPos)
 		table.clear(cheerHomes)
 		table.clear(cheerPhases)
 		table.clear(cheerHops)
+		table.clear(cheerMoved)
 		for _, part in crowdFolder:GetChildren() do
 			if part:IsA("BasePart") then
-				table.insert(cheerParts, part)
-				table.insert(cheerHomes, part.CFrame)
-				table.insert(cheerPhases, part:GetAttribute("Phase") or 0)
-				-- Fans near where the ball landed go crazy
-				local near = if landPos then math.max(0, 1 - (part.Position - landPos).Magnitude / 45) else 0
-				table.insert(cheerHops, 1.6 * (1 + 2 * near))
+				local phase = part:GetAttribute("Phase") or 0
+				local distance = if landPos then (part.Position - landPos).Magnitude else math.huge
+				-- Everyone near the ball jumps, plus every third fan everywhere else
+				-- (a fan's shirt and head share a Phase, so they always jump together)
+				if distance < 150 or math.floor(phase * 1000) % 3 == 0 then
+					table.insert(cheerParts, part)
+					table.insert(cheerHomes, part.CFrame)
+					table.insert(cheerPhases, phase)
+					-- Fans right where the ball landed go crazy
+					table.insert(cheerHops, 1.6 * (1 + 2 * math.max(0, 1 - distance / 45)))
+				end
 			end
 		end
 	end
@@ -1556,13 +1605,12 @@ RunService.RenderStepped:Connect(function()
 	-- Crowd jumping
 	if now < cheerUntil then
 		cheering = true
-		local moved = table.create(#cheerParts)
 		for i, home in cheerHomes do
 			local hop = math.max(0, math.sin(now * 14 + cheerPhases[i])) * cheerHops[i]
-			moved[i] = home + Vector3.new(0, hop, 0)
+			cheerMoved[i] = home + Vector3.new(0, hop, 0)
 		end
 		pcall(function()
-			workspace:BulkMoveTo(cheerParts, moved, Enum.BulkMoveMode.FireCFrameChanged)
+			workspace:BulkMoveTo(cheerParts, cheerMoved, Enum.BulkMoveMode.FireCFrameChanged)
 		end)
 	elseif cheering then
 		cheering = false
@@ -2024,6 +2072,20 @@ local function toggleShop()
 	setShopOpen(not shopFrame.Visible)
 end
 
+-- Is the player typing in chat? (The new chat box doesn't count as a "focused TextBox".)
+local chatBar = nil
+local function typingInChat()
+	if UserInputService:GetFocusedTextBox() ~= nil then
+		return true
+	end
+	if not (chatBar and chatBar.Parent) then
+		pcall(function()
+			chatBar = game:GetService("TextChatService"):FindFirstChildOfClass("ChatInputBarConfiguration")
+		end)
+	end
+	return chatBar ~= nil and chatBar.IsFocused
+end
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	local inputType = input.UserInputType
 	local key = input.KeyCode
@@ -2032,10 +2094,14 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 			trySwing()
 		end
 	elseif inputType == Enum.UserInputType.Keyboard then
-		if UserInputService:GetFocusedTextBox() ~= nil then
-			return -- typing in chat
+		if typingInChat() then
+			return
 		end
-		if key == Enum.KeyCode.Space or key == Enum.KeyCode.F then
+		if key == Enum.KeyCode.Space then
+			trySwing() -- (Space always looks "used" because Roblox uses it for jumping)
+		elseif gameProcessed then
+			return
+		elseif key == Enum.KeyCode.F then
 			trySwing()
 		elseif key == Enum.KeyCode.E then
 			toggleShop()

@@ -549,10 +549,11 @@ local function buildField()
 			flagColors[i], Enum.Material.Fabric))
 	end
 
-	-- Turn off any other spawn points so everyone spawns in the dugout
+	-- Remove any other spawn points so everyone spawns in the dugout
+	-- (the Baseplate template's spawn pad would stick out of center field)
 	for _, obj in workspace:GetDescendants() do
 		if obj:IsA("SpawnLocation") then
-			obj.Enabled = false
+			obj:Destroy()
 		end
 	end
 
