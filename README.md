@@ -1,21 +1,22 @@
 # Warren's Home Run Derby
 
-A Roblox home run derby. Two scripts build everything in code: the stadium, the
-ROBO-PITCHER 4000, the crowd, the shop, and the screen buttons.
+A Roblox home run derby. Four scripts build everything in code: the stadium, the
+ROBO-PITCHER 4000, the crowd, the shop, the screen buttons, the swing, and the sprint.
 
 | Script | Where it goes in Studio | File here |
 | --- | --- | --- |
-| `BaseballServer` (Script) | ServerScriptService | `src/server/BaseballServer.server.luau` |
-| `BaseballClient` (LocalScript) | StarterPlayer > StarterPlayerScripts | `src/client/BaseballClient.client.luau` |
+| 1. `BaseballServer` (Script) | ServerScriptService | `src/server/BaseballServer.server.luau` |
+| 2. `BaseballClient` (LocalScript) | StarterPlayer > StarterPlayerScripts | `src/client/BaseballClient.client.luau` |
+| 3. `SwingAnimation` (ModuleScript, name must match) | ReplicatedStorage | `src/shared/SwingAnimation.luau` |
+| 4. `RunAnimation` (LocalScript) | StarterPlayer > StarterPlayerScripts | `src/client/RunAnimation.client.luau` |
 
 ## Install
 
 **Copy and paste (easiest):** open a new Baseplate place in Roblox Studio, then paste each
-file into the place in the table above. Script 1 must be a **Script**; script 2 must be a
-**LocalScript**.
+file into the place in the table above, as the kind of script the table says.
 
 **Rojo:** `rojo serve` with `default.project.json` puts the scripts in the same places
-(inside folders named `Server` and `Client`).
+(inside folders named `Server`, `Client`, and `Shared`; Script 2 finds `SwingAnimation` inside `Shared`).
 
 To save baseballs and bats: publish the game, then Home > Game Settings > Security >
 turn on "Enable Studio Access to API Services".
@@ -27,8 +28,11 @@ turn on "Enable Studio Access to API Services".
 - Outfield bleachers full of fans. Home runs land in the crowd, with a glowing ring and the distance.
 - ROBO-PITCHER 4000: an arm that winds up and whips the ball over the top, plus a screen
   that shows the pitch type and MPH. Seven pitches, including a knuckleball that wobbles.
-- Full-body swing: load, stride, hip turn, back-foot pivot, both hands on the bat (R15 avatars).
-  You can also paste a Toolbox animation ID into `SWING_ANIMATION_ID` in the client script.
+- Full-body swing in its own script (SwingAnimation): load, stride, hip turn, back-foot pivot,
+  both hands on the bat (R15 avatars). The poses are numbers at the top you can change. You can
+  also paste a Toolbox animation ID into `SWING_ANIMATION_ID` in the client script.
+- Sprint animation in its own script (RunAnimation): forward lean, knee drive, arms pumping, for
+  every player. Made in code, so no animation ID or permissions are needed.
 - Works on computer, phone/tablet, and console. A badge shows which one the game detected.
   - Computer: click / Space / F swing, E shop, Q leave the box
   - Phone/tablet: big SWING button (or tap), SHOP and LEAVE BOX buttons
