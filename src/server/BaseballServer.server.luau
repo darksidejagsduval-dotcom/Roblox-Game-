@@ -744,10 +744,10 @@ local function buildField()
 	leaders.lines[1].Text = "BE THE FIRST!"
 
 	field.Parent = workspace
-	return board, leaders, screenLabels, beam
+	return board, leaders, screenLabels, beam, boxSign
 end
 
-local board, leaderBoard, machineScreen, batBeam = buildField()
+local board, leaderBoard, machineScreen, batBeam, batSign = buildField()
 print(string.format("[Baseball] Stadium built with %d parts", partCount))
 
 local function setScreen(name, speed, info, color)
@@ -898,6 +898,8 @@ local nextPitchAt = 0
 local savedMovement = nil -- the batter's normal walk speed, so we can give it back
 local boardFlashToken = 0
 local topHomers = {}      -- longest home runs since the server started: { name, distance }
+local roundId = 0         -- changes every time a round starts, so old timers can tell
+local afterRound          -- (filled in below) gives the box to a friend who's waiting
 
 local function updateScoreboard()
 	remotes:SetAttribute("BatterUserId", batter and batter.UserId or 0)
@@ -908,6 +910,7 @@ local function updateScoreboard()
 	board.batter.Text = batter and ("AT BAT: " .. string.upper(batter.DisplayName)) or "STEP UP TO BAT!"
 	board.stats.Text = string.format("HR %d     OUTS %d/%d", homers, outs, MAX_OUTS)
 	batBeam.Transparency = if batter then 1 else 0.82
+	batSign.Enabled = batter == nil
 end
 
 local function updateLeaders()
@@ -953,8 +956,9 @@ local function addOut(plr)
 	updateScoreboard()
 	if outs >= MAX_OUTS then
 		nextPitchAt = math.max(nextPitchAt, os.clock() + 7)
+		local thisRound = roundId
 		task.delay(2.5, function()
-			if batter ~= plr then
+			if batter ~= plr or roundId ~= thisRound then
 				return
 			end
 			sendResult({
@@ -969,7 +973,9 @@ local function addOut(plr)
 			streak = 0
 			roundEarned = 0
 			roundLongest = 0
+			roundId += 1
 			updateScoreboard()
+			afterRound(plr)
 		end)
 	end
 end
@@ -1029,7 +1035,7 @@ local function computeHit(offset, bat)
 
 	if math.abs(sprayDeg) > 45 then
 		hit.kind = "FOUL"
-		hit.flightTime = math.min(tLand, 2.5)
+		hit.flightTime = math.min(tLand, 6)
 	elseif carry > fence then
 		local tFence = fence / vh
 		local heightAtFence = h0 + vy * tFence - 0.5 * BALL_GRAVITY * tFence * tFence
@@ -1105,6 +1111,7 @@ end
 
 local function setBatter(plr)
 	batter = plr
+	roundId += 1
 	outs = 0
 	homers = 0
 	streak = 0
@@ -1123,6 +1130,7 @@ end
 
 local function clearBatter()
 	batter = nil
+	roundId += 1
 	unlockBatter()
 	if activePitch then
 		activePitch.resolved = true
@@ -1133,6 +1141,20 @@ local function clearBatter()
 	streak = 0
 	setScreen("ROBO-PITCHER", "READY", "STEP INTO THE BOX!")
 	updateScoreboard()
+end
+
+-- After a round, a friend waiting by the box gets the next turn
+afterRound = function(plr)
+	for _, other in Players:GetPlayers() do
+		if other ~= plr and inBox(other, 3) then
+			clearBatter()
+			local char = plr.Character
+			if char then
+				char:PivotTo(CFrame.lookAt(LEAVE_SPOT, HOME + Vector3.new(0, 3, 0)))
+			end
+			return
+		end
+	end
 end
 
 LeaveEvent.OnServerEvent:Connect(function(plr)
@@ -1278,7 +1300,7 @@ SwingEvent.OnServerEvent:Connect(function(plr, pitchId, offset)
 		flashBoard(if streak >= 2 then string.format("%d IN A ROW!!!", streak) else "HOMERUN!!!", Color3.fromRGB(255, 70, 70))
 		recordHomer(plr.DisplayName, hit.distance)
 		setScreen("HOME RUN!", string.format("%d FT", hit.distance), string.format("EXIT VELO %d MPH", hit.exitVelo), GOLD)
-		nextPitchAt = os.clock() + 4.5
+		nextPitchAt = os.clock() + math.max(4.5, math.min(hit.flightTime, 6) + 1)
 		updateScoreboard()
 		sendResult(hit)
 	else
@@ -1292,7 +1314,7 @@ SwingEvent.OnServerEvent:Connect(function(plr, pitchId, offset)
 			hit.text = string.format("Caught at %d FT - out", hit.distance)
 			board.last.Text = string.format("LAST HIT: %d FT", hit.distance)
 		end
-		nextPitchAt = os.clock() + 2.5
+		nextPitchAt = os.clock() + math.max(2.5, math.min(hit.flightTime, 6) + 0.8)
 		sendResult(hit)
 		addOut(plr)
 	end

@@ -363,8 +363,8 @@ end
 -- Which device you're on, top right
 local modeBadge = Instance.new("TextLabel")
 modeBadge.Name = "ModeBadge"
-modeBadge.AnchorPoint = Vector2.new(1, 0)
-modeBadge.Position = UDim2.new(1, -12, 0, 10)
+modeBadge.AnchorPoint = Vector2.new(0.5, 0)
+modeBadge.Position = UDim2.new(0.5, 0, 0, 80)
 modeBadge.Size = UDim2.new(0, 130, 0, 28)
 modeBadge.Font = Enum.Font.GothamBold
 modeBadge.TextScaled = true
@@ -807,6 +807,34 @@ local holdLookPos = nil
 local holdLookUntil = 0
 local shakeUntil = 0
 local camLook = BAT_LOOK
+local fadedChars = {} -- [character] = true while we've faded them out of the batting view
+
+local function fadeCharacter(char, amount)
+	for _, part in char:GetDescendants() do
+		if part:IsA("BasePart") then
+			part.LocalTransparencyModifier = amount
+		end
+	end
+end
+
+-- Other players standing between the camera and the plate fade so you can see the pitch
+local function fadeBlockers(on)
+	for _, plr in Players:GetPlayers() do
+		local char = plr.Character
+		if plr ~= player and char then
+			local root = char:FindFirstChild("HumanoidRootPart")
+			local blocking = on and root ~= nil and math.abs(root.Position.X - HOME.X) < 6
+				and root.Position.Z > HOME.Z + 1 and root.Position.Z < BAT_SPOT.Z + 3
+			if blocking then
+				fadeCharacter(char, 0.8)
+				fadedChars[char] = true
+			elseif fadedChars[char] then
+				fadeCharacter(char, 0)
+				fadedChars[char] = nil
+			end
+		end
+	end
+end
 
 local function cameraStep(dt)
 	local now = os.clock()
@@ -829,6 +857,7 @@ local function cameraStep(dt)
 	end
 	camera.CFrame = cf
 	camera.Focus = CFrame.new(camLook)
+	fadeBlockers(true)
 	-- If you were zoomed all the way in, Roblox hid your body. Show it while you bat.
 	local char = player.Character
 	if char then
@@ -911,6 +940,7 @@ local function setBatting(on)
 		currentPitch = nil
 		followBall = nil
 		holdLookPos = nil
+		fadeBlockers(false)
 	end
 	applyMode()
 end
@@ -1073,13 +1103,24 @@ local JOINT_LIST = {
 	{ "lHip", "LeftUpperLeg", "LeftHip" }, { "lKnee", "LeftLowerLeg", "LeftKnee" }, { "lAnkle", "LeftFoot", "LeftAnkle" },
 }
 
+-- New Roblox places build avatars with AnimationConstraint joints; older ones use Motor6D.
+-- Both work the same way for us (we read C0/C1 and set Transform).
+local function findJoint(part, name)
+	for _, child in part:GetChildren() do
+		if child.Name == name and (child:IsA("AnimationConstraint") or child:IsA("Motor6D")) then
+			return child
+		end
+	end
+	return nil
+end
+
 -- Finds all 15 joints of an R15 avatar (nil for R6 avatars or if it hasn't loaded yet)
 local function getJoints(char)
 	local joints = {}
 	for _, info in JOINT_LIST do
 		local part = char:FindFirstChild(info[2])
-		local joint = part and part:FindFirstChild(info[3])
-		if not (joint and joint:IsA("Motor6D")) then
+		local joint = part and findJoint(part, info[3])
+		if not joint then
 			return nil
 		end
 		joints[info[1]] = joint
@@ -1494,6 +1535,8 @@ PitchEvent.OnClientEvent:Connect(function(data)
 
 	local control = (data.startPos + data.endPos) / 2 + data.bend
 	if data.batterUserId == player.UserId then
+		followBall = nil -- stop watching the last hit; here comes the next pitch
+		holdLookPos = nil
 		currentPitch = { id = data.id, startTime = data.startTime, arrive = data.startTime + data.duration, swung = false }
 		swingTick.Visible = false
 		meterLabel.Text = ""
@@ -1927,4 +1970,9 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	end
 end)
 
-swingButton.Activated:Connect(trySwing)
+-- Swing the moment your finger touches the button (not when it lifts off)
+swingButton.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		trySwing()
+	end
+end)

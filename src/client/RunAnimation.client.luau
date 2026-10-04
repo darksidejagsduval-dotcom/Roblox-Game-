@@ -38,13 +38,24 @@ local JOINT_LIST = {
 	{ "lHip", "LeftUpperLeg", "LeftHip" }, { "lKnee", "LeftLowerLeg", "LeftKnee" }, { "lAnkle", "LeftFoot", "LeftAnkle" },
 }
 
+-- New Roblox places build avatars with AnimationConstraint joints; older ones use Motor6D.
+-- Both work the same way for us (we read C0/C1 and set Transform).
+local function findJoint(part, name)
+	for _, child in part:GetChildren() do
+		if child.Name == name and (child:IsA("AnimationConstraint") or child:IsA("Motor6D")) then
+			return child
+		end
+	end
+	return nil
+end
+
 -- Finds the joints of an R15 avatar (nil for R6 avatars or if it hasn't loaded yet)
 local function getJoints(char)
 	local joints = {}
 	for _, info in JOINT_LIST do
 		local part = char:FindFirstChild(info[2])
-		local joint = part and part:FindFirstChild(info[3])
-		if not (joint and joint:IsA("Motor6D")) then
+		local joint = part and findJoint(part, info[3])
+		if not joint then
 			return nil
 		end
 		joints[info[1]] = joint
@@ -89,11 +100,21 @@ local function batterUserId()
 	return folder and folder:GetAttribute("BatterUserId") or 0
 end
 
-local runners = setmetatable({}, { __mode = "k" }) -- [character] = { joints, phase, weight }
+local runners = {} -- [character] = { joints, phase, weight }
+local lastCleanup = 0
 
 RunService.Stepped:Connect(function(_, dt)
 	dt = math.min(dt, 0.1)
 	local batterId = batterUserId()
+	-- forget characters that are gone (respawned or left the game)
+	if os.clock() - lastCleanup > 5 then
+		lastCleanup = os.clock()
+		for char in runners do
+			if not char.Parent then
+				runners[char] = nil
+			end
+		end
+	end
 	for _, plr in Players:GetPlayers() do
 		local char = plr.Character
 		local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -113,13 +134,17 @@ RunService.Stepped:Connect(function(_, dt)
 		if not joints or not joints.root.Parent then
 			continue
 		end
+		if plr.UserId == batterId then
+			state.weight = 0 -- the batter belongs to the swing script
+			continue
+		end
 
 		-- How fast are they going across the ground?
 		local velocity = root.AssemblyLinearVelocity
 		local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
 		local onGround = math.abs(velocity.Y) < 4 and not hum.Sit and hum.Health > 0
 		local goal = 0
-		if onGround and plr.UserId ~= batterId then
+		if onGround then
 			goal = math.clamp((speed - START_SPEED) / (FULL_SPEED - START_SPEED), 0, 1)
 		end
 		state.weight += (goal - state.weight) * math.min(1, dt * 8)
