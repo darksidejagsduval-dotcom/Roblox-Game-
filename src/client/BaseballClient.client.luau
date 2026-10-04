@@ -1,9 +1,10 @@
 --[[
 	BaseballClient  (LocalScript in StarterPlayer > StarterPlayerScripts)
-	Warren's Home Run Derby, version 3.
-	Draws the ball, animates the swing, runs the camera, the shop, the baseball
-	counter, the pitching machine, the crowd, and the HOMERUNNNN show.
-	Works with mouse, keyboard, and touch screens.
+	Warren's Home Run Derby, version 4.
+	Draws the balls, swings the bat (full body: stride, hip turn, back-foot pivot, two hands
+	on the bat), runs the camera, the shop, the baseball counter, the ROBO-PITCHER arm,
+	the crowd, and the HOMERUNNNN show.
+	Knows if you're on a computer, a phone/tablet, or a console and sets the controls to match.
 ]]
 
 local Players = game:GetService("Players")
@@ -12,10 +13,25 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local SoundService = game:GetService("SoundService")
+local GuiService = game:GetService("GuiService")
 local Debris = game:GetService("Debris")
 
--- Optional: put a sound ID from the Toolbox here to play on every home run (0 = no sound)
-local HOMER_SOUND_ID = 0
+---------------------------------------------------------------------
+-- SETTINGS
+---------------------------------------------------------------------
+-- A swing animation from the Toolbox (0 = use the built-in swing).
+-- How: Toolbox > search "baseball swing" > insert one > click it > copy the number
+-- from AnimationId (rbxassetid://THIS_NUMBER) and put it here. It has to be an R15 animation.
+local SWING_ANIMATION_ID = 0
+-- Sound IDs from the Toolbox (0 = no sound)
+local HOMER_SOUND_ID = 0   -- plays on every home run
+local HIT_SOUND_ID = 0     -- the crack of the bat
+local CROWD_SOUND_ID = 0   -- the crowd cheering
+-- Whoosh when you swing ("" = no whoosh). If Output ever says this sound failed, set it to "".
+local SWING_SOUND = "rbxasset://sounds/swordslash.wav"
+local SHOW_STRIKE_ZONE = true   -- glowing box at the plate while you bat
+local SHOW_TIMING_METER = true  -- the bar at the bottom that shows when to swing
+---------------------------------------------------------------------
 
 local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -37,9 +53,13 @@ local function waitForAttribute(name)
 end
 
 local HOME = waitForAttribute("Home")
+local MOUND = waitForAttribute("Mound")
 local FENCE_DIST = waitForAttribute("FenceCenter")
+local SWING_WINDOW = waitForAttribute("SwingWindow")
+local PITCH_LEAD = waitForAttribute("PitchLead")
 -- Camera spot behind home plate, looking out at the pitching machine
-local BAT_VIEW = CFrame.lookAt(HOME + Vector3.new(1.5, 6, 14), HOME + Vector3.new(0, 3, -30))
+local BAT_SPOT = HOME + Vector3.new(2, 6.5, 15)
+local BAT_LOOK = MOUND + Vector3.new(0, 4, 0)
 
 -- Ask the server what's in the shop
 local catalog = {}
@@ -59,24 +79,371 @@ for _, item in catalog do
 end
 
 ---------------------------------------------------------------------
+-- The swing math (full body, R15 avatars)
+---------------------------------------------------------------------
+local Swing = (function()
+	-- Everything here is measured from the batter's HumanoidRootPart (the invisible box in
+	-- the middle of every avatar), so it works wherever the batter stands. The hands are put
+	-- ON the bat first, then the arms and legs bend to reach them ("IK"), so both hands stay
+	-- on the bat for the whole swing.
+	local Swing = {}
+	local rad = math.rad
+
+	-- Size of the avatar these poses were made for. Bigger or smaller avatars get scaled.
+	local STANDARD_ARM = 1.76
+	local STANDARD_LEG = 1.81
+	local HAND_SPREAD = 0.3 -- how far each hand sits from the middle of the grip, along the bat
+	local ARM_HINGE = Vector3.new(1, 0, 0) -- elbows bend toward the front
+	local LEG_HINGE = Vector3.new(-1, 0, 0) -- knees bend toward the back
+
+	--[[
+		POSES. Change these numbers to change how the swing looks!
+		Directions are from the batter's point of view while they stand in the box facing the plate:
+		x+ = toward the catcher, x- = toward the pitcher, y+ = up, z- = toward the plate.
+
+		hipYaw / torsoYaw  turn the hips / the chest (+ turns toward the pitcher)
+		lean / side        tip the chest forward (-) / tilt the shoulders (- drops the back shoulder)
+		drop / shift       sink the hips (bends the knees) / slide the hips (- = toward the pitcher)
+		grip               where the hands are (studs from the middle of the batter)
+		batYaw / batPitch  where the bat points: yaw 0 = at the plate, 90 = at the pitcher,
+		                   -90 = at the catcher. pitch 90 = straight up
+		front / back       move each foot;  frontYaw / backYaw turn each foot (+ = toward the pitcher)
+		backHeel           lift the back heel (the "squish the bug" pivot)
+		lookYaw/lookPitch  where the eyes look (same directions as batYaw)
+		rPole / lPole      which way each elbow points
+	]]
+	Swing.STANCE = {
+		hipYaw = -5, torsoYaw = -10, lean = -12, side = 0, drop = 0.3, shift = 0.1,
+		grip = Vector3.new(0.75, 0.35, -1.1), batYaw = -90, batPitch = 53,
+		front = Vector3.new(-0.45, 0, 0), frontYaw = 0, back = Vector3.new(0.45, 0, 0), backYaw = 0, backHeel = 0,
+		lookYaw = 88, lookPitch = -3,
+		rPole = Vector3.new(0.5, -1, 0.4), lPole = Vector3.new(-1, -0.5, -1),
+	}
+	-- Load: as the pitch comes, the hands go back and the front leg lifts
+	Swing.LOAD = {
+		hipYaw = -15, torsoYaw = -12, lean = -12, side = 0, drop = 0.25, shift = 0.2,
+		grip = Vector3.new(1.05, 0.45, -1), batYaw = -95, batPitch = 53,
+		front = Vector3.new(-0.6, 0.35, 0.05), frontYaw = -5, back = Vector3.new(0.45, 0, 0), backYaw = 0, backHeel = 0,
+		lookYaw = 88, lookPitch = -3,
+		rPole = Vector3.new(0.6, -1, 0.4), lPole = Vector3.new(1, -0.5, -1),
+	}
+	-- Stride: the front foot lands toward the pitcher. Ready to swing!
+	Swing.PLANT = {
+		hipYaw = 0, torsoYaw = -20, lean = -14, side = 0, drop = 0.4, shift = -0.1,
+		grip = Vector3.new(0.95, 0.3, -1), batYaw = -99, batPitch = 41,
+		front = Vector3.new(-1.05, 0, -0.05), frontYaw = 25, back = Vector3.new(0.45, 0, 0), backYaw = 0, backHeel = 0,
+		lookYaw = 85, lookPitch = -8,
+		rPole = Vector3.new(0.6, -1, 0.4), lPole = Vector3.new(-1, -0.5, -1),
+	}
+	-- Launch: the hips fire, the hands drop into the slot, the bat lags behind
+	Swing.LAUNCH = {
+		hipYaw = 30, torsoYaw = -15, lean = -10, side = -6, drop = 0.45, shift = -0.25,
+		grip = Vector3.new(0.3, -0.4, -1.2), batYaw = -111, batPitch = 30,
+		front = Vector3.new(-1.05, 0, -0.05), frontYaw = 25, back = Vector3.new(0.4, 0.05, 0), backYaw = 30, backHeel = 15,
+		lookYaw = 40, lookPitch = -20,
+		rPole = Vector3.new(0, -1, 1), lPole = Vector3.new(-0.3, -1, 0),
+	}
+	-- Contact: hips open, the bat is flat over the plate, front arm straight
+	Swing.CONTACT = {
+		hipYaw = 55, torsoYaw = -5, lean = -10, side = -12, drop = 0.45, shift = -0.3,
+		grip = Vector3.new(-0.6, -0.45, -1.15), batYaw = -9, batPitch = 4,
+		front = Vector3.new(-1.05, 0, -0.05), frontYaw = 25, back = Vector3.new(0.35, 0.12, -0.05), backYaw = 65, backHeel = 30,
+		lookYaw = 5, lookPitch = -30,
+		rPole = Vector3.new(0.5, -0.5, 0), lPole = Vector3.new(0, -0.5, -1),
+	}
+	-- Extension: both arms reach out toward the field
+	Swing.EXTEND = {
+		hipYaw = 80, torsoYaw = 10, lean = -12, side = -8, drop = 0.4, shift = -0.3,
+		grip = Vector3.new(-1.3, -0.05, -0.3), batYaw = 81, batPitch = 3,
+		front = Vector3.new(-1.05, 0, -0.05), frontYaw = 25, back = Vector3.new(0.3, 0.18, -0.1), backYaw = 80, backHeel = 40,
+		lookYaw = 60, lookPitch = -5,
+		rPole = Vector3.new(0.5, 0, -1), lPole = Vector3.new(0, 0, 0.5),
+	}
+	-- Finish: the bat wraps around behind the front shoulder
+	Swing.FINISH = {
+		hipYaw = 95, torsoYaw = 35, lean = -5, side = 0, drop = 0.35, shift = -0.3,
+		grip = Vector3.new(-0.7, 0.9, 0.2), batYaw = 249, batPitch = -30,
+		front = Vector3.new(-1.05, 0, -0.05), frontYaw = 25, back = Vector3.new(0.25, 0.2, -0.1), backYaw = 85, backHeel = 45,
+		lookYaw = 80, lookPitch = 5,
+		rPole = Vector3.new(0.5, 0, -1), lPole = Vector3.new(0.5, 0, 1),
+	}
+	-- Same as STANCE, but the bat came all the way around (so it doesn't spin backward)
+	local STANCE_AROUND = table.clone(Swing.STANCE)
+	STANCE_AROUND.batYaw += 360
+
+	-- The swing, starting from wherever the batter was when they clicked.
+	-- ease: how that part speeds up or slows down ("in" = speeds up, "out" = slows down)
+	Swing.SWING_KEYS = {
+		{ time = 0.00 },
+		{ time = 0.05, pose = Swing.LAUNCH, ease = "in" },
+		{ time = 0.10, pose = Swing.CONTACT, ease = "linear" },
+		{ time = 0.17, pose = Swing.EXTEND, ease = "linear" },
+		{ time = 0.32, pose = Swing.FINISH, ease = "out" },
+		{ time = 0.60, pose = Swing.FINISH, ease = "linear" },
+		{ time = 0.95, pose = STANCE_AROUND, ease = "inout" },
+	}
+	Swing.SWING_TIME = 0.95
+	Swing.CONTACT_TIME = 0.10
+
+	-- Getting ready while the pitch comes in (times are from when the ball leaves the machine)
+	Swing.PREP_KEYS = {
+		{ time = -0.35, pose = Swing.STANCE },
+		{ time = -0.10, pose = Swing.LOAD, ease = "inout" },
+		{ time = 0.15, pose = Swing.PLANT, ease = "inout" },
+	}
+
+	local function ease(kind, a)
+		if kind == "in" then
+			return a * a
+		elseif kind == "out" then
+			return 1 - (1 - a) * (1 - a)
+		elseif kind == "linear" then
+			return a
+		end
+		return a * a * (3 - 2 * a)
+	end
+
+	function Swing.blend(a, b, alpha)
+		local out = {}
+		for key, value in a do
+			out[key] = value + (b[key] - value) * alpha
+		end
+		return out
+	end
+
+	-- Where the batter is at time t in a list of keys. startPose fills in a key with no pose.
+	function Swing.sample(keys, t, startPose)
+		if t <= keys[1].time then
+			return keys[1].pose or startPose
+		end
+		for i = 1, #keys - 1 do
+			local a, b = keys[i], keys[i + 1]
+			if t <= b.time then
+				local alpha = (t - a.time) / (b.time - a.time)
+				return Swing.blend(a.pose or startPose, b.pose or startPose, ease(b.ease, alpha))
+			end
+		end
+		return keys[#keys].pose or startPose
+	end
+
+	-- Which way something points, from yaw/pitch in degrees
+	local function direction(yaw, pitch)
+		return (CFrame.Angles(0, rad(yaw), 0) * CFrame.Angles(rad(pitch), 0, 0)).LookVector
+	end
+
+	-- A frame for one bone: its Y axis runs back up the bone, its X axis is the hinge
+	local function boneFrame(bone, hinge)
+		local y = -bone.Unit
+		local x = hinge - y * hinge:Dot(y)
+		if x.Magnitude < 1e-5 then
+			x = Vector3.new(y.Y, -y.X, 0)
+			if x.Magnitude < 1e-5 then
+				x = Vector3.new(1, 0, 0)
+			end
+		end
+		x = x.Unit
+		return CFrame.fromMatrix(Vector3.zero, x, y, x:Cross(y))
+	end
+
+	-- Bends a 3-joint limb (shoulder-elbow-wrist or hip-knee-ankle) so the end part
+	-- (hand or foot) lands on endCF. pole = which way the elbow/knee should point.
+	local function solveLimb(parentCF, j1, j2, j3, endCF, pole, hingeRest)
+		local S = (parentCF * j1.C0).Position
+		local W = (endCF * j3.C1).Position
+		local a = j2.C0.Position - j1.C1.Position
+		local b = j3.C0.Position - j2.C1.Position
+		local L1, L2 = a.Magnitude, b.Magnitude
+		local toW = W - S
+		local dist = toW.Magnitude
+		local u = if dist > 1e-4 then toW / dist else Vector3.new(0, -1, 0)
+		local d = math.clamp(dist, math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3)
+		local along = (L1 * L1 - L2 * L2 + d * d) / (2 * d)
+		local h = math.sqrt(math.max(L1 * L1 - along * along, 0))
+		local p = pole - u * pole:Dot(u)
+		if p.Magnitude < 1e-4 then
+			p = Vector3.new(0, 0, 1) - u * u.Z
+		end
+		p = p.Unit
+		local E = S + u * along + p * h
+		local Wr = S + u * d
+		local hinge = p:Cross(u)
+		local R1 = boneFrame(E - S, hinge) * boneFrame(a, hingeRest):Inverse()
+		local R2 = boneFrame(Wr - E, hinge) * boneFrame(b, hingeRest):Inverse()
+		local part1 = CFrame.new(S - R1 * j1.C1.Position) * R1
+		local part2 = CFrame.new(E - R2 * j2.C1.Position) * R2
+		local endRot = endCF.Rotation
+		local part3 = CFrame.new(Wr - endRot * j3.C1.Position) * endRot
+		j1.Transform = (j1.C0:Inverse() * parentCF:Inverse() * part1 * j1.C1).Rotation
+		j2.Transform = (j2.C0:Inverse() * part1:Inverse() * part2 * j2.C1).Rotation
+		j3.Transform = (j3.C0:Inverse() * part2:Inverse() * part3 * j3.C1).Rotation
+		return part3, E, Wr
+	end
+
+	-- A hand holding the bat: the bat goes through the fist, the fingers wrap the rest of the way
+	-- (fingers = roughly which way the forearm points)
+	local function handFrame(center, dir, fingers)
+		fingers -= dir * fingers:Dot(dir)
+		if fingers.Magnitude < 1e-4 then
+			fingers = Vector3.new(0, -1, 0) - dir * -dir.Y
+		end
+		local y = -fingers.Unit
+		local z = -dir
+		return CFrame.fromMatrix(center, y:Cross(z), y, z)
+	end
+
+	-- Measures the avatar once: its size, and where its feet normally are
+	function Swing.measure(j)
+		local lower = j.root.C0 * j.root.C1:Inverse()
+		local function restFoot(hip, knee, ankle)
+			return lower * hip.C0 * hip.C1:Inverse() * knee.C0 * knee.C1:Inverse() * ankle.C0 * ankle.C1:Inverse()
+		end
+		local arm = (j.rElbow.C0.Position - j.rShoulder.C1.Position).Magnitude
+			+ (j.rWrist.C0.Position - j.rElbow.C1.Position).Magnitude
+		local leg = (j.rKnee.C0.Position - j.rHip.C1.Position).Magnitude
+			+ (j.rAnkle.C0.Position - j.rKnee.C1.Position).Magnitude
+		local armScale = arm / STANDARD_ARM
+		local legScale = leg / STANDARD_LEG
+		return {
+			scale = (armScale + legScale) / 2,
+			legScale = legScale,
+			rFoot = restFoot(j.rHip, j.rKnee, j.rAnkle),
+			lFoot = restFoot(j.lHip, j.lKnee, j.lAnkle),
+		}
+	end
+
+	-- Poses the whole body. j = the 15 R15 joints, rig = Swing.measure(j), p = a pose.
+	-- Returns where each hand ended up (the bat is welded to the right one).
+	function Swing.apply(j, rig, p)
+		local root = CFrame.new(p.shift * rig.legScale, -p.drop * rig.legScale, 0) * CFrame.Angles(0, rad(p.hipYaw), 0)
+		j.root.Transform = root
+		local lowerCF = j.root.C0 * root * j.root.C1:Inverse()
+		local waist = CFrame.Angles(0, rad(p.torsoYaw), 0) * CFrame.Angles(rad(p.lean), 0, 0) * CFrame.Angles(0, 0, rad(p.side))
+		j.waist.Transform = waist
+		local upperCF = lowerCF * j.waist.C0 * waist * j.waist.C1:Inverse()
+
+		-- Head: keep the eyes on the ball (a neck can only turn so far)
+		local rel = upperCF.Rotation:Inverse() * direction(p.lookYaw, p.lookPitch)
+		local yaw = math.clamp(math.atan2(-rel.X, -rel.Z), -rad(80), rad(80))
+		local pitch = math.clamp(math.asin(math.clamp(rel.Y, -1, 1)), -rad(50), rad(50))
+		j.neck.Transform = j.neck.C0.Rotation:Inverse() * CFrame.Angles(0, yaw, 0) * CFrame.Angles(pitch, 0, 0) * j.neck.C1.Rotation
+
+		-- Arms: both hands on the bat. First guess, then again with the hands lined up
+		-- with the forearms so the wrists don't bend in weird ways.
+		local dir = direction(p.batYaw, p.batPitch)
+		local grip = p.grip * rig.scale
+		local rCenter = grip + dir * HAND_SPREAD
+		local lCenter = grip - dir * HAND_SPREAD
+		local rHand = handFrame(rCenter, dir, rCenter - (upperCF * j.rShoulder.C0).Position)
+		local lHand = handFrame(lCenter, dir, lCenter - (upperCF * j.lShoulder.C0).Position)
+		local _, rElbow, rWrist = solveLimb(upperCF, j.rShoulder, j.rElbow, j.rWrist, rHand, p.rPole, ARM_HINGE)
+		local _, lElbow, lWrist = solveLimb(upperCF, j.lShoulder, j.lElbow, j.lWrist, lHand, p.lPole, ARM_HINGE)
+		rHand = handFrame(rCenter, dir, rWrist - rElbow)
+		lHand = handFrame(lCenter, dir, lWrist - lElbow)
+		local rightHand = solveLimb(upperCF, j.rShoulder, j.rElbow, j.rWrist, rHand, p.rPole, ARM_HINGE)
+		local leftHand = solveLimb(upperCF, j.lShoulder, j.lElbow, j.lWrist, lHand, p.lPole, ARM_HINGE)
+
+		-- Legs: the feet stay planted (or step) while the hips turn
+		local function foot(rest, offset, footYaw, heel)
+			local lift = math.sin(rad(heel)) * 0.45 * rig.legScale
+			return CFrame.new(rest.Position + offset * rig.legScale + Vector3.new(0, lift, 0))
+				* CFrame.Angles(0, rad(footYaw), 0) * CFrame.Angles(-rad(heel), 0, 0) * rest.Rotation
+		end
+		local lFoot = foot(rig.lFoot, p.front, p.frontYaw, 0)
+		local rFoot = foot(rig.rFoot, p.back, p.backYaw, p.backHeel)
+		solveLimb(lowerCF, j.lHip, j.lKnee, j.lAnkle, lFoot, lFoot.LookVector + Vector3.new(-0.3, 0, 0), LEG_HINGE)
+		solveLimb(lowerCF, j.rHip, j.rKnee, j.rAnkle, rFoot, rFoot.LookVector + Vector3.new(0.3, 0, 0), LEG_HINGE)
+		return rightHand, leftHand, rHand, lHand
+	end
+
+	-- Puts every joint back to normal
+	function Swing.reset(j)
+		for _, joint in j do
+			joint.Transform = CFrame.new()
+		end
+	end
+
+	Swing.HAND_SPREAD = HAND_SPREAD
+	return Swing
+end)()
+
+---------------------------------------------------------------------
+-- Computer, phone/tablet, or console?
+---------------------------------------------------------------------
+local mode = "computer"
+local MODE_INFO = {
+	computer = { badge = "COMPUTER", color = Color3.fromRGB(60, 140, 255) },
+	mobile = { badge = "MOBILE", color = Color3.fromRGB(60, 190, 90) },
+	console = { badge = "CONSOLE", color = Color3.fromRGB(170, 90, 255) },
+}
+
+-- What kind of device has these buttons?
+local function modeFromDevice()
+	if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+		return "mobile"
+	end
+	if (UserInputService.GamepadEnabled and not UserInputService.KeyboardEnabled) or GuiService:IsTenFootInterface() then
+		return "console"
+	end
+	return "computer"
+end
+
+-- What did the player just touch? (nil = doesn't tell us anything)
+local function modeFromInput(inputType)
+	if inputType == Enum.UserInputType.Touch then
+		return "mobile"
+	elseif string.find(inputType.Name, "Gamepad") then
+		return "console"
+	elseif inputType == Enum.UserInputType.Keyboard or string.find(inputType.Name, "Mouse") then
+		return "computer"
+	end
+	return nil
+end
+
+---------------------------------------------------------------------
 -- Screen helpers
 ---------------------------------------------------------------------
 local gui = Instance.new("ScreenGui")
 gui.Name = "BaseballGui"
 gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function()
+	gui.ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets -- stay out of the Roblox buttons and phone notches
+end)
 gui.Parent = player:WaitForChild("PlayerGui")
+
+-- Everything sits in one frame that shrinks on small screens and grows on big ones
+local root = Instance.new("Frame")
+root.Name = "Root"
+root.AnchorPoint = Vector2.new(0.5, 0.5)
+root.Position = UDim2.new(0.5, 0, 0.5, 0)
+root.Size = UDim2.new(1, 0, 1, 0)
+root.BackgroundTransparency = 1
+root.Active = false
+root.Parent = gui
+local uiScale = Instance.new("UIScale")
+uiScale.Parent = root
+
+local function updateScale()
+	local vp = camera.ViewportSize
+	local s = math.clamp(math.min(vp.X / 1280, vp.Y / 720), 0.55, 1.3)
+	uiScale.Scale = s
+	root.Size = UDim2.new(1 / s, 0, 1 / s, 0)
+end
+camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
+updateScale()
 
 local GREEN = Color3.fromRGB(60, 170, 80)
 local BLUE = Color3.fromRGB(50, 120, 220)
 local GRAY = Color3.fromRGB(90, 95, 110)
 local RED = Color3.fromRGB(200, 60, 60)
 local GOLD = Color3.fromRGB(255, 215, 0)
+local PANEL = Color3.fromRGB(20, 25, 40)
 
 local function addCorner(obj, radius)
 	local c = Instance.new("UICorner")
 	c.CornerRadius = radius or UDim.new(0, 12)
 	c.Parent = obj
+	return c
 end
 
 local function addStroke(obj, thickness)
@@ -117,6 +484,7 @@ local function makeButton(parent, name, text, size, position, color)
 	b.Text = text
 	b.TextScaled = true
 	b.TextColor3 = Color3.new(1, 1, 1)
+	b.AutoButtonColor = true
 	addCorner(b)
 	addStroke(b, 2)
 	local pad = Instance.new("UIPadding")
@@ -146,21 +514,38 @@ local function fadeIn(label)
 	end
 end
 
+local function playSound(id, volume)
+	if id == 0 or id == "" then
+		return
+	end
+	local sound = Instance.new("Sound")
+	sound.SoundId = if type(id) == "number" then "rbxassetid://" .. id else id
+	sound.Volume = volume or 1
+	sound.Parent = SoundService
+	sound:Play()
+	Debris:AddItem(sound, 12)
+end
+
 ---------------------------------------------------------------------
 -- Screen: status, messages, and the big HOMERUN text
 ---------------------------------------------------------------------
-local statusLabel = makeLabel(gui, "Status", UDim2.new(0.55, 0, 0, 34), UDim2.new(0.5, 0, 0, 64), nil, 30)
-local pitchLabel = makeLabel(gui, "Pitch", UDim2.new(0.4, 0, 0, 26), UDim2.new(0.5, 0, 0, 100), nil, 26)
+local statusLabel = makeLabel(root, "Status", UDim2.new(0.6, 0, 0, 34), UDim2.new(0.5, 0, 0, 26), nil, 30)
+local pitchLabel = makeLabel(root, "Pitch", UDim2.new(0.45, 0, 0, 28), UDim2.new(0.5, 0, 0, 60), nil, 26)
 pitchLabel.TextColor3 = Color3.fromRGB(255, 220, 120)
-local messageLabel = makeLabel(gui, "Message", UDim2.new(0.56, 0, 0, 52), UDim2.new(0.5, 0, 0.24, 0), nil, 44)
+local messageLabel = makeLabel(root, "Message", UDim2.new(0.6, 0, 0, 52), UDim2.new(0.5, 0, 0.22, 0), nil, 44)
+local statsLabel = makeLabel(root, "HitStats", UDim2.new(0.6, 0, 0, 30), UDim2.new(0.5, 0, 0.22, 46), Enum.Font.GothamBold, 26)
+statsLabel.TextColor3 = Color3.fromRGB(150, 230, 255)
 
-local homerLabel = makeLabel(gui, "Homer", UDim2.new(0.95, 0, 0.22, 0), UDim2.new(0.5, 0, 0.42, 0), Enum.Font.LuckiestGuy)
+local homerLabel = makeLabel(root, "Homer", UDim2.new(0.95, 0, 0.22, 0), UDim2.new(0.5, 0, 0.42, 0), Enum.Font.LuckiestGuy)
 homerLabel.Visible = false
 homerLabel:FindFirstChildOfClass("UIStroke").Thickness = 6
 local homerScale = Instance.new("UIScale")
 homerScale.Parent = homerLabel
-local homerSub = makeLabel(gui, "HomerSub", UDim2.new(0.7, 0, 0.07, 0), UDim2.new(0.5, 0, 0.56, 0))
+local homerSub = makeLabel(root, "HomerSub", UDim2.new(0.75, 0, 0.07, 0), UDim2.new(0.5, 0, 0.56, 0))
 homerSub.Visible = false
+local homerExtra = makeLabel(root, "HomerExtra", UDim2.new(0.6, 0, 0.055, 0), UDim2.new(0.5, 0, 0.63, 0), Enum.Font.LuckiestGuy)
+homerExtra.Visible = false
+homerExtra.TextColor3 = GOLD
 
 local messageToken = 0
 local function showMessage(text, color)
@@ -176,17 +561,53 @@ local function showMessage(text, color)
 	end)
 end
 
+local statsToken = 0
+local function showStats(text)
+	statsToken += 1
+	local token = statsToken
+	statsLabel.Text = text
+	fadeIn(statsLabel)
+	task.delay(3.2, function()
+		if token == statsToken then
+			fadeOut(statsLabel, 0.5)
+		end
+	end)
+end
+
+-- Which device you're on, top right
+local modeBadge = Instance.new("TextLabel")
+modeBadge.Name = "ModeBadge"
+modeBadge.AnchorPoint = Vector2.new(1, 0)
+modeBadge.Position = UDim2.new(1, -12, 0, 10)
+modeBadge.Size = UDim2.new(0, 130, 0, 28)
+modeBadge.Font = Enum.Font.GothamBold
+modeBadge.TextScaled = true
+modeBadge.TextColor3 = Color3.new(1, 1, 1)
+modeBadge.BackgroundTransparency = 0.15
+addCorner(modeBadge, UDim.new(1, 0))
+local badgePad = Instance.new("UIPadding")
+badgePad.PaddingTop = UDim.new(0, 5)
+badgePad.PaddingBottom = UDim.new(0, 5)
+badgePad.PaddingLeft = UDim.new(0, 10)
+badgePad.PaddingRight = UDim.new(0, 10)
+badgePad.Parent = modeBadge
+modeBadge.Parent = root
+
+-- Controls help at the bottom
+local hintLabel = makeLabel(root, "Hint", UDim2.new(0.8, 0, 0, 24), UDim2.new(0.5, 0, 1, -22), Enum.Font.GothamBold, 22)
+hintLabel.TextColor3 = Color3.fromRGB(230, 230, 230)
+
 ---------------------------------------------------------------------
 -- Screen: baseball counter (left side)
 ---------------------------------------------------------------------
 local counter = Instance.new("Frame")
 counter.Name = "BaseballCounter"
 counter.Size = UDim2.new(0, 180, 0, 48)
-counter.Position = UDim2.new(0, 16, 0, 124)
-counter.BackgroundColor3 = Color3.fromRGB(20, 25, 40)
+counter.Position = UDim2.new(0, 16, 0.3, 0)
+counter.BackgroundColor3 = PANEL
 counter.BackgroundTransparency = 0.2
 addCorner(counter)
-counter.Parent = gui
+counter.Parent = root
 local counterScale = Instance.new("UIScale")
 counterScale.Parent = counter
 
@@ -209,30 +630,136 @@ local function refreshCount()
 end
 refreshCount()
 
-local function showEarned(amount, lucky)
-	local pop = makeLabel(gui, "Earned", UDim2.new(0, 230, 0, 36), UDim2.new(0, 320, 0, 148), Enum.Font.LuckiestGuy)
-	pop.Text = "+" .. amount .. (lucky and "  LUCKY x2!" or "")
-	pop.TextColor3 = lucky and GOLD or Color3.new(1, 1, 1)
+local function showEarned(amount, lucky, golden)
+	local pop = makeLabel(root, "Earned", UDim2.new(0, 260, 0, 36), UDim2.new(0, 330, 0.3, 24), Enum.Font.LuckiestGuy)
+	pop.Text = "+" .. amount .. (if golden then "  GOLDEN!" else "") .. (if lucky then "  LUCKY x2!" else "")
+	pop.TextColor3 = (lucky or golden) and GOLD or Color3.new(1, 1, 1)
 	TweenService:Create(pop, TweenInfo.new(1.4, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-		{ Position = UDim2.new(0, 320, 0, 96) }):Play()
+		{ Position = UDim2.new(0, 330, 0.3, -30) }):Play()
 	task.delay(0.6, fadeOut, pop, 0.8)
 	Debris:AddItem(pop, 1.6)
 
-	counterScale.Scale = lucky and 1.4 or 1.2
+	counterScale.Scale = (lucky or golden) and 1.4 or 1.2
 	TweenService:Create(counterScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 end
 
 ---------------------------------------------------------------------
--- Screen: buttons (they work with mouse AND touch)
+-- Screen: buttons (they work with mouse, touch, and controllers)
 ---------------------------------------------------------------------
-local shopButton = makeButton(gui, "ShopButton", "SHOP", UDim2.new(0, 180, 0, 52), UDim2.new(0, 16, 0, 182), GREEN)
-local leaveButton = makeButton(gui, "LeaveButton", "LEAVE BOX", UDim2.new(0, 180, 0, 44), UDim2.new(0, 16, 0, 244), GRAY)
+local shopButton = makeButton(root, "ShopButton", "SHOP", UDim2.new(0, 180, 0, 52), UDim2.new(0, 16, 0.3, 58), GREEN)
+local leaveButton = makeButton(root, "LeaveButton", "LEAVE BOX", UDim2.new(0, 180, 0, 44), UDim2.new(0, 16, 0.3, 120), GRAY)
 leaveButton.Visible = false
 
-local swingButton = makeButton(gui, "SwingButton", "SWING", UDim2.new(0, 120, 0, 120), UDim2.new(1, -24, 0.5, 0), RED)
-swingButton.AnchorPoint = Vector2.new(1, 0.5)
+local swingButton = makeButton(root, "SwingButton", "SWING", UDim2.new(0, 210, 0, 210), UDim2.new(1, -30, 1, -30), RED)
+swingButton.AnchorPoint = Vector2.new(1, 1)
 swingButton:FindFirstChildOfClass("UICorner").CornerRadius = UDim.new(0.5, 0)
 swingButton.Visible = false
+
+---------------------------------------------------------------------
+-- Screen: the timing meter (when to swing)
+---------------------------------------------------------------------
+local METER_EARLY = 0.7 -- the meter starts this many seconds before the ball reaches the plate
+local METER_LATE = 0.3  -- ...and ends this long after
+local meter = Instance.new("Frame")
+meter.Name = "TimingMeter"
+meter.AnchorPoint = Vector2.new(0.5, 1)
+meter.Position = UDim2.new(0.5, 0, 1, -52)
+meter.Size = UDim2.new(0, 440, 0, 26)
+meter.BackgroundColor3 = PANEL
+meter.BackgroundTransparency = 0.15
+meter.Visible = false
+addCorner(meter, UDim.new(1, 0))
+addStroke(meter, 2).Color = Color3.fromRGB(255, 255, 255)
+meter.Parent = root
+
+local function meterX(secondsFromPlate)
+	return math.clamp((secondsFromPlate + METER_EARLY) / (METER_EARLY + METER_LATE), 0, 1)
+end
+
+local hitZone = Instance.new("Frame")
+hitZone.AnchorPoint = Vector2.new(0.5, 0.5)
+hitZone.Position = UDim2.new(meterX(0), 0, 0.5, 0)
+hitZone.BackgroundColor3 = Color3.fromRGB(70, 200, 90)
+hitZone.BackgroundTransparency = 0.25
+hitZone.BorderSizePixel = 0
+addCorner(hitZone, UDim.new(1, 0))
+hitZone.Parent = meter
+local perfectZone = Instance.new("Frame")
+perfectZone.AnchorPoint = Vector2.new(0.5, 0.5)
+perfectZone.Position = UDim2.new(meterX(0), 0, 0.5, 0)
+perfectZone.BackgroundColor3 = GOLD
+perfectZone.BorderSizePixel = 0
+perfectZone.Parent = meter
+local meterBall = Instance.new("Frame")
+meterBall.AnchorPoint = Vector2.new(0.5, 0.5)
+meterBall.Size = UDim2.new(0, 22, 0, 22)
+meterBall.Position = UDim2.new(0, 0, 0.5, 0)
+meterBall.BackgroundColor3 = Color3.new(1, 1, 1)
+meterBall.Visible = false
+addCorner(meterBall, UDim.new(1, 0))
+addStroke(meterBall, 2).Color = Color3.fromRGB(220, 40, 40)
+meterBall.Parent = meter
+local swingTick = Instance.new("Frame")
+swingTick.AnchorPoint = Vector2.new(0.5, 0.5)
+swingTick.Size = UDim2.new(0, 5, 1, 12)
+swingTick.BorderSizePixel = 0
+swingTick.Visible = false
+swingTick.Parent = meter
+local meterLabel = makeLabel(meter, "MeterLabel", UDim2.new(0, 160, 0, 22), UDim2.new(0.5, 0, 0, -16), Enum.Font.LuckiestGuy, 20)
+
+local function batTiming()
+	local item = ITEMS[player:GetAttribute("EquippedBat") or "wood"]
+	return item and item.timing or 1
+end
+
+local function refreshMeterZones()
+	local window = SWING_WINDOW * batTiming()
+	local span = METER_EARLY + METER_LATE
+	hitZone.Size = UDim2.new(2 * window / span, 0, 1, -6)
+	perfectZone.Size = UDim2.new(math.max(2 * 0.1 * window / span, 0.012), 0, 1, -6)
+end
+refreshMeterZones()
+
+---------------------------------------------------------------------
+-- Screen: round summary
+---------------------------------------------------------------------
+local roundPanel = Instance.new("Frame")
+roundPanel.Name = "RoundSummary"
+roundPanel.AnchorPoint = Vector2.new(0.5, 0.5)
+roundPanel.Position = UDim2.new(0.5, 0, 0.5, 0)
+roundPanel.Size = UDim2.new(0, 460, 0, 250)
+roundPanel.BackgroundColor3 = PANEL
+roundPanel.BackgroundTransparency = 0.05
+roundPanel.Visible = false
+addCorner(roundPanel, UDim.new(0, 18))
+addStroke(roundPanel, 3).Color = GOLD
+roundPanel.Parent = root
+local roundTitle = makeLabel(roundPanel, "Title", UDim2.new(0.9, 0, 0, 50), UDim2.new(0.5, 0, 0, 40), Enum.Font.LuckiestGuy)
+roundTitle.Text = "ROUND OVER!"
+roundTitle.TextColor3 = GOLD
+local roundLines = {}
+for i = 1, 3 do
+	roundLines[i] = makeLabel(roundPanel, "Line" .. i, UDim2.new(0.85, 0, 0, 34), UDim2.new(0.5, 0, 0, 85 + i * 42), Enum.Font.FredokaOne)
+end
+local roundScale = Instance.new("UIScale")
+roundScale.Parent = roundPanel
+
+local roundToken = 0
+local function showRoundSummary(info)
+	roundToken += 1
+	local token = roundToken
+	roundLines[1].Text = string.format("HOME RUNS: %d", info.homers or 0)
+	roundLines[2].Text = string.format("LONGEST: %s", (info.longest or 0) > 0 and (info.longest .. " FT") or "-")
+	roundLines[3].Text = string.format("BASEBALLS: +%d", info.earned or 0)
+	roundPanel.Visible = true
+	roundScale.Scale = 0.3
+	TweenService:Create(roundScale, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+	task.delay(5, function()
+		if token == roundToken then
+			roundPanel.Visible = false
+		end
+	end)
+end
 
 ---------------------------------------------------------------------
 -- Screen: the shop window
@@ -245,10 +772,11 @@ shopFrame.Size = UDim2.new(0.92, 0, 0.82, 0)
 shopFrame.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
 shopFrame.Visible = false
 addCorner(shopFrame, UDim.new(0, 16))
+addStroke(shopFrame, 3).Color = Color3.fromRGB(80, 90, 130)
 local shopLimit = Instance.new("UISizeConstraint")
-shopLimit.MaxSize = Vector2.new(760, 540)
+shopLimit.MaxSize = Vector2.new(780, 560)
 shopLimit.Parent = shopFrame
-shopFrame.Parent = gui
+shopFrame.Parent = root
 
 local shopTitle = makeLabel(shopFrame, "Title", UDim2.new(0.5, 0, 0, 40), UDim2.new(0, 16, 0, 30), Enum.Font.LuckiestGuy, 40)
 shopTitle.AnchorPoint = Vector2.new(0, 0.5)
@@ -274,7 +802,7 @@ list.CanvasSize = UDim2.new(0, 0, 0, 0)
 list.AutomaticCanvasSize = Enum.AutomaticSize.Y
 list.Parent = shopFrame
 local grid = Instance.new("UIGridLayout")
-grid.CellSize = UDim2.new(0, 190, 0, 160)
+grid.CellSize = UDim2.new(0, 190, 0, 170)
 grid.CellPadding = UDim2.new(0, 10, 0, 10)
 grid.HorizontalAlignment = Enum.HorizontalAlignment.Center
 grid.SortOrder = Enum.SortOrder.LayoutOrder
@@ -296,17 +824,6 @@ local function showToast(text, color)
 	end)
 end
 
-local function describe(item)
-	if item.kind == "luck" then
-		return string.format("Lucky x2 chance: %d%%", math.floor(item.luck * 100 + 0.5))
-	end
-	if item.price == 0 then
-		return "Your starter bat"
-	end
-	return string.format("Power +%d%%\nTiming +%d%%",
-		math.floor((item.power - 1) * 100 + 0.5), math.floor((item.timing - 1) * 100 + 0.5))
-end
-
 local function ownedSet()
 	local owned = {}
 	for id in string.gmatch(player:GetAttribute("Owned") or "", "[^,]+") do
@@ -315,7 +832,28 @@ local function ownedSet()
 	return owned
 end
 
+-- A little bar that shows how good a bat is
+local function statBar(card, y, label, amount, color)
+	local text = makeLabel(card, label .. "Label", UDim2.new(0, 70, 0, 16), UDim2.new(0, 10, 0, y), Enum.Font.GothamBold, 14)
+	text.AnchorPoint = Vector2.new(0, 0.5)
+	text.TextXAlignment = Enum.TextXAlignment.Left
+	text.Text = label
+	local back = Instance.new("Frame")
+	back.AnchorPoint = Vector2.new(0, 0.5)
+	back.Position = UDim2.new(0, 80, 0, y)
+	back.Size = UDim2.new(1, -92, 0, 10)
+	back.BackgroundColor3 = Color3.fromRGB(15, 18, 30)
+	addCorner(back, UDim.new(1, 0))
+	back.Parent = card
+	local fill = Instance.new("Frame")
+	fill.Size = UDim2.new(math.clamp(amount, 0.04, 1), 0, 1, 0)
+	fill.BackgroundColor3 = color
+	addCorner(fill, UDim.new(1, 0))
+	fill.Parent = back
+end
+
 local cardButtons = {}
+local firstCardButton = nil
 
 local function refreshShop()
 	local owned = ownedSet()
@@ -334,6 +872,7 @@ local function refreshShop()
 		end
 	end
 	luckLabel.Text = string.format("Your lucky x2 chance: %d%%", math.floor((player:GetAttribute("Luck") or 0.15) * 100 + 0.5))
+	refreshMeterZones()
 end
 
 local shopBusy = false
@@ -379,14 +918,22 @@ for index, item in catalog do
 	addCorner(swatch, UDim.new(1, 0))
 	swatch.Parent = card
 
-	local infoLabel = makeLabel(card, "Info", UDim2.new(1, -12, 0, 38), UDim2.new(0.5, 0, 0, 86), nil, 20)
-	infoLabel.Text = describe(item)
+	if item.kind == "bat" then
+		statBar(card, 78, "POWER", (item.power - 0.9) / 0.55, Color3.fromRGB(255, 120, 60))
+		statBar(card, 98, "TIMING", (item.timing - 0.9) / 0.45, Color3.fromRGB(90, 200, 255))
+	else
+		local infoLabel = makeLabel(card, "Info", UDim2.new(1, -12, 0, 38), UDim2.new(0.5, 0, 0, 88), nil, 20)
+		infoLabel.Text = string.format("Lucky x2 chance: %d%%", math.floor(item.luck * 100 + 0.5))
+	end
 
 	local button = makeButton(card, "Action", "", UDim2.new(1, -16, 0, 40), UDim2.new(0, 8, 1, -48), GREEN)
 	button.Activated:Connect(function()
 		onCardPressed(item)
 	end)
 	cardButtons[item.id] = button
+	if index == 1 then
+		firstCardButton = button
+	end
 	card.Parent = list
 end
 
@@ -394,12 +941,21 @@ if #catalog == 0 then
 	showToast("The shop couldn't load. Try rejoining.", RED)
 end
 
-shopButton.Activated:Connect(function()
-	shopFrame.Visible = not shopFrame.Visible
+local function setShopOpen(open)
+	shopFrame.Visible = open
 	refreshShop()
+	if open and mode == "console" and firstCardButton then
+		GuiService.SelectedObject = firstCardButton
+	elseif not open and GuiService.SelectedObject and GuiService.SelectedObject:IsDescendantOf(shopFrame) then
+		GuiService.SelectedObject = nil
+	end
+end
+
+shopButton.Activated:Connect(function()
+	setShopOpen(not shopFrame.Visible)
 end)
 closeButton.Activated:Connect(function()
-	shopFrame.Visible = false
+	setShopOpen(false)
 end)
 
 baseballsValue.Changed:Connect(function()
@@ -410,61 +966,166 @@ player.AttributeChanged:Connect(refreshShop)
 refreshShop()
 
 ---------------------------------------------------------------------
+-- The strike zone (only you see it, only while you bat)
+---------------------------------------------------------------------
+local zoneParts = {}
+do
+	local zone = Instance.new("Model")
+	zone.Name = "StrikeZone"
+	local left, right, bottom, top = -1, 1, 2.1, 3.5
+	local bars = {
+		{ Vector3.new(right - left, 0.06, 0.06), Vector3.new(0, bottom, 0) },
+		{ Vector3.new(right - left, 0.06, 0.06), Vector3.new(0, top, 0) },
+		{ Vector3.new(0.06, top - bottom, 0.06), Vector3.new(left, (top + bottom) / 2, 0) },
+		{ Vector3.new(0.06, top - bottom, 0.06), Vector3.new(right, (top + bottom) / 2, 0) },
+	}
+	for _, bar in bars do
+		local p = Instance.new("Part")
+		p.Anchored = true
+		p.CanCollide = false
+		p.CanQuery = false
+		p.CanTouch = false
+		p.CastShadow = false
+		p.Material = Enum.Material.Neon
+		p.Color = Color3.fromRGB(255, 255, 255)
+		p.Size = bar[1]
+		p.CFrame = CFrame.new(HOME + bar[2])
+		p.Transparency = 1
+		p.Parent = zone
+		table.insert(zoneParts, p)
+	end
+	zone.Parent = workspace
+end
+
+local function showStrikeZone(on)
+	for _, p in zoneParts do
+		p.Transparency = if on and SHOW_STRIKE_ZONE then 0.55 else 1
+	end
+end
+
+---------------------------------------------------------------------
 -- Camera: behind the plate while you bat, follows the ball when you hit it
 ---------------------------------------------------------------------
 local batting = false
 local currentPitch = nil -- the pitch you can swing at right now
 local followBall = nil
+local holdLookPos = nil
+local holdLookUntil = 0
 local shakeUntil = 0
+local camLook = BAT_LOOK
 
-local function cameraStep()
-	local cf = BAT_VIEW
+local function cameraStep(dt)
+	local now = os.clock()
+	local target = BAT_LOOK
+	local following = false
 	if followBall and followBall.Parent then
-		cf = CFrame.lookAt(BAT_VIEW.Position, followBall.Position)
+		target = followBall.Position
+		following = true
+	elseif holdLookPos and now < holdLookUntil then
+		target = holdLookPos
+		following = true
 	end
-	if os.clock() < shakeUntil then
-		cf = cf * CFrame.Angles((math.random() - 0.5) * 0.03, (math.random() - 0.5) * 0.03, 0)
+	camLook = camLook:Lerp(target, math.min(1, dt * (if following then 12 else 4)))
+	local distance = (camLook - BAT_SPOT).Magnitude
+	local fovGoal = if following then math.clamp(70 - (distance - 50) * 0.12, 32, 70) else 70
+	camera.FieldOfView += (fovGoal - camera.FieldOfView) * math.min(1, dt * 3)
+	local cf = CFrame.lookAt(BAT_SPOT, camLook)
+	if now < shakeUntil then
+		cf *= CFrame.Angles((math.random() - 0.5) * 0.03, (math.random() - 0.5) * 0.03, 0)
 	end
 	camera.CFrame = cf
 end
+
+local function setTouchControls(on)
+	pcall(function()
+		GuiService.TouchControlsEnabled = on
+	end)
+end
+
+-- Shows the right buttons and help for computer / phone / console
+local function applyMode()
+	local info = MODE_INFO[mode]
+	modeBadge.Text = info.badge
+	modeBadge.BackgroundColor3 = info.color
+	local isMobile = mode == "mobile"
+	swingButton.Visible = batting and isMobile
+	setTouchControls(not (batting and isMobile))
+	if mode == "computer" then
+		shopButton.Text = "SHOP [E]"
+		leaveButton.Text = "LEAVE [Q]"
+		hintLabel.Text = if batting then "CLICK or SPACE = swing  |  Q = leave box  |  E = shop" else "Walk into the glowing box to bat  |  E = shop"
+	elseif mode == "console" then
+		shopButton.Text = "SHOP (Y)"
+		leaveButton.Text = "LEAVE (B)"
+		hintLabel.Text = if batting then "R2 or A = swing  |  B = leave box  |  Y = shop" else "Walk into the glowing box to bat  |  Y = shop"
+	else
+		shopButton.Text = "SHOP"
+		leaveButton.Text = "LEAVE BOX"
+		hintLabel.Text = if batting then "Tap SWING when the ball reaches the plate!" else "Walk into the glowing box to bat"
+	end
+	-- Bigger buttons for fingers, smaller cards so the shop fits a phone
+	shopButton.Size = if isMobile then UDim2.new(0, 210, 0, 66) else UDim2.new(0, 180, 0, 52)
+	leaveButton.Size = if isMobile then UDim2.new(0, 210, 0, 58) else UDim2.new(0, 180, 0, 44)
+	leaveButton.Position = if isMobile then UDim2.new(0, 16, 0.3, 134) else UDim2.new(0, 16, 0.3, 120)
+	grid.CellSize = if isMobile then UDim2.new(0, 170, 0, 160) else UDim2.new(0, 190, 0, 170)
+end
+
+local function setMode(newMode)
+	if newMode and newMode ~= mode then
+		mode = newMode
+		applyMode()
+	end
+end
+
+mode = modeFromDevice()
+UserInputService.LastInputTypeChanged:Connect(function(inputType)
+	setMode(modeFromInput(inputType))
+end)
 
 local function setBatting(on)
 	if on == batting then
 		return
 	end
 	batting = on
-	swingButton.Visible = on
 	leaveButton.Visible = on
+	meter.Visible = on and SHOW_TIMING_METER
+	showStrikeZone(on)
 	if on then
 		camera.CameraType = Enum.CameraType.Scriptable
+		camLook = BAT_LOOK
 		RunService:BindToRenderStep("BaseballCamera", Enum.RenderPriority.Camera.Value + 1, cameraStep)
-		local how = UserInputService.TouchEnabled and "Tap SWING" or "Click or press SPACE"
+		local how = if mode == "mobile" then "Tap SWING" elseif mode == "console" then "Press R2" else "Click or press SPACE"
 		showMessage(how .. " when the ball reaches the plate!", Color3.new(1, 1, 1))
 	else
 		RunService:UnbindFromRenderStep("BaseballCamera")
 		camera.CameraType = Enum.CameraType.Custom
+		camera.FieldOfView = 70
 		local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 		if hum then
 			camera.CameraSubject = hum
 		end
 		currentPitch = nil
 		followBall = nil
+		holdLookPos = nil
 	end
+	applyMode()
 end
 
 local function refreshHud()
 	local batterId = remotes:GetAttribute("BatterUserId") or 0
 	local outs = remotes:GetAttribute("Outs") or 0
 	local homers = remotes:GetAttribute("Homers") or 0
+	local streak = remotes:GetAttribute("Streak") or 0
 	local maxOuts = remotes:GetAttribute("MaxOuts") or 10
+	local streakText = if streak >= 2 then string.format("   STREAK x%d!", streak) else ""
 	if batterId == 0 then
 		statusLabel.Text = "HOME RUN DERBY - walk into the glowing box to bat!"
 		pitchLabel.Text = ""
 	elseif batterId == player.UserId then
-		statusLabel.Text = string.format("OUTS %d/%d     HOME RUNS %d", outs, maxOuts, homers)
+		statusLabel.Text = string.format("OUTS %d/%d     HOME RUNS %d%s", outs, maxOuts, homers, streakText)
 	else
-		statusLabel.Text = string.format("%s is batting - OUTS %d/%d   HOME RUNS %d",
-			remotes:GetAttribute("BatterName") or "Someone", outs, maxOuts, homers)
+		statusLabel.Text = string.format("%s is batting - OUTS %d/%d   HOME RUNS %d%s",
+			remotes:GetAttribute("BatterName") or "Someone", outs, maxOuts, homers, streakText)
 	end
 end
 
@@ -472,106 +1133,40 @@ remotes.AttributeChanged:Connect(function()
 	refreshHud()
 	setBatting(remotes:GetAttribute("BatterUserId") == player.UserId)
 end)
+applyMode()
 refreshHud()
 setBatting(remotes:GetAttribute("BatterUserId") == player.UserId)
 
-leaveButton.Activated:Connect(function()
-	LeaveEvent:FireServer()
-end)
+local function leaveBox()
+	if batting then
+		LeaveEvent:FireServer()
+	end
+end
+leaveButton.Activated:Connect(leaveBox)
 
 ---------------------------------------------------------------------
--- The bat and the swing animation (for R15 avatars, the Roblox default)
+-- The bat (everyone's screen draws it in the batter's hand)
 ---------------------------------------------------------------------
--- Each pose is in degrees.
---   waist  = twist the upper body (+ turns toward the pitcher)
---   rYaw / rPitch / rRoll / rElbow = right arm,  lYaw / lPitch / lElbow = left arm
---   neck   = turn the head
--- Change these numbers to change how the swing looks!
-local STANCE = { waist = -10, rYaw = -30, rPitch = 40, rRoll = 0, rElbow = 150, lYaw = -45, lPitch = 70, lElbow = 90, neck = 85 }
-local SWING_KEYS = {
-	{ time = 0.00, pose = STANCE },
-	-- load: hands start forward, bat drops in behind you
-	{ time = 0.07, pose = { waist = 10, rYaw = -80, rPitch = 80, rRoll = -60, rElbow = 60, lYaw = -50, lPitch = 85, lElbow = 50, neck = 70 } },
-	-- contact: hips and shoulders open, arms and bat level out over the plate
-	{ time = 0.14, pose = { waist = 40, rYaw = -40, rPitch = 90, rRoll = 0, rElbow = 5, lYaw = -60, lPitch = 90, lElbow = 5, neck = -10 } },
-	-- follow-through: bat wraps around behind your front shoulder
-	{ time = 0.32, pose = { waist = 70, rYaw = 47, rPitch = 107, rRoll = 70, rElbow = 90, lYaw = 30, lPitch = 110, lElbow = 80, neck = -30 } },
-	-- back to your stance
-	{ time = 0.85, pose = STANCE },
+-- Pieces measured from the knob end of the bat. The right (top) hand holds it TOP_HAND studs up.
+local TOP_HAND = 0.45 + Swing.HAND_SPREAD
+local BAT_PIECES = {
+	{ name = "Knob", from = 0, to = 0.1, thick = 0.42 },
+	{ name = "Handle", from = 0.08, to = 1.5, thick = 0.2 },
+	{ name = "Taper", from = 1.4, to = 2.05, thick = 0.3 },
+	{ name = "Barrel", from = 1.95, to = 3.3, thick = 0.42 },
 }
-local SWING_TIME = 0.85
+local BAT_TIP = 3.3
 
-local swingStarts = {} -- [userId] = when that player's swing started
-
-local function poseAt(elapsed)
-	for i = 1, #SWING_KEYS - 1 do
-		local a, b = SWING_KEYS[i], SWING_KEYS[i + 1]
-		if elapsed <= b.time then
-			local alpha = (elapsed - a.time) / (b.time - a.time)
-			alpha = alpha * alpha * (3 - 2 * alpha) -- smooth in and out
-			local pose = {}
-			for key, value in a.pose do
-				pose[key] = value + (b.pose[key] - value) * alpha
-			end
-			return pose
-		end
-	end
-	return STANCE
-end
-
-local function getJoints(char)
-	local function motor(partName, jointName)
-		local part = char:FindFirstChild(partName)
-		local joint = part and part:FindFirstChild(jointName)
-		if joint and joint:IsA("Motor6D") then
-			return joint
-		end
-		return nil
-	end
-	return {
-		waist = motor("UpperTorso", "Waist"),
-		rShoulder = motor("RightUpperArm", "RightShoulder"),
-		rElbow = motor("RightLowerArm", "RightElbow"),
-		lShoulder = motor("LeftUpperArm", "LeftShoulder"),
-		lElbow = motor("LeftLowerArm", "LeftElbow"),
-		neck = motor("Head", "Neck"),
-	}
-end
-
-local function applyPose(joints, pose)
-	local rad = math.rad
-	if joints.waist then
-		joints.waist.Transform = CFrame.Angles(0, rad(pose.waist), 0)
-	end
-	if joints.rShoulder then
-		joints.rShoulder.Transform = CFrame.Angles(0, rad(pose.rYaw), 0)
-			* CFrame.Angles(rad(pose.rPitch), 0, 0)
-			* CFrame.Angles(0, rad(pose.rRoll), 0)
-	end
-	if joints.rElbow then
-		joints.rElbow.Transform = CFrame.Angles(rad(pose.rElbow), 0, 0)
-	end
-	if joints.lShoulder then
-		joints.lShoulder.Transform = CFrame.Angles(0, rad(pose.lYaw), 0) * CFrame.Angles(rad(pose.lPitch), 0, 0)
-	end
-	if joints.lElbow then
-		joints.lElbow.Transform = CFrame.Angles(rad(pose.lElbow), 0, 0)
-	end
-	if joints.neck then
-		joints.neck.Transform = CFrame.Angles(0, rad(pose.neck), 0)
-	end
-end
-
--- The bat in the batter's hand. Every player's screen draws it, so everyone sees it.
 local visualBat = nil
 local visualBatHand = nil
 local visualBatStyle = nil
+local batTrail = nil
 
 local function removeVisualBat()
 	if visualBat then
 		visualBat:Destroy()
 	end
-	visualBat, visualBatHand, visualBatStyle = nil, nil, nil
+	visualBat, visualBatHand, visualBatStyle, batTrail = nil, nil, nil, nil
 end
 
 local function batMaterial(name)
@@ -596,16 +1191,15 @@ local function updateVisualBat(batterPlayer, char)
 	local item = ITEMS[style] or ITEMS.wood
 	local color = item and item.color or Color3.fromRGB(181, 132, 82)
 	local material = batMaterial(item and item.material or "Wood")
-	-- The bat sticks straight out of the top of your fist
-	local fist = hand.Name == "RightHand" and 0.35 or -0.6
+	local r15 = hand.Name == "RightHand"
 
 	local model = Instance.new("Model")
 	model.Name = "VisualBat"
-	local function piece(name, length, thickness, centerY)
+	local function piece(name, shape, length, thick, centerFromKnob)
 		local p = Instance.new("Part")
 		p.Name = name
-		p.Shape = Enum.PartType.Cylinder
-		p.Size = Vector3.new(length, thickness, thickness)
+		p.Shape = shape
+		p.Size = if shape == Enum.PartType.Ball then Vector3.new(thick, thick, thick) else Vector3.new(length, thick, thick)
 		p.Color = color
 		p.Material = material
 		p.CanCollide = false
@@ -617,19 +1211,199 @@ local function updateVisualBat(batterPlayer, char)
 		local weld = Instance.new("Weld")
 		weld.Part0 = hand
 		weld.Part1 = p
-		weld.C0 = CFrame.new(0, centerY, 0) * CFrame.Angles(0, 0, math.rad(90))
+		if r15 then
+			-- The bat goes straight through the fist (out the thumb side)
+			weld.C0 = CFrame.new(0, 0, -(centerFromKnob - TOP_HAND)) * CFrame.Angles(0, math.rad(90), 0)
+		else
+			-- R6 avatars: the bat sticks out of the bottom of the arm
+			weld.C0 = CFrame.new(0, -1, -(centerFromKnob - TOP_HAND)) * CFrame.Angles(0, math.rad(90), 0)
+		end
 		weld.Parent = p
 		p.Parent = model
+		return p
 	end
-	piece("Handle", 1.9, 0.28, fist - 0.95)
-	piece("Barrel", 2.5, 0.5, fist - 1.9 - 1.25)
+	local barrel
+	for _, info in BAT_PIECES do
+		local p = piece(info.name, Enum.PartType.Cylinder, info.to - info.from, info.thick, (info.from + info.to) / 2)
+		if info.name == "Barrel" then
+			barrel = p
+		end
+	end
+	piece("EndCap", Enum.PartType.Ball, 0, 0.42, BAT_TIP)
+
+	-- A streak behind the barrel while swinging
+	local barrelCenter = (BAT_PIECES[4].from + BAT_PIECES[4].to) / 2
+	local a0 = Instance.new("Attachment")
+	a0.Position = Vector3.new(2.0 - barrelCenter, 0, 0)
+	a0.Parent = barrel
+	local a1 = Instance.new("Attachment")
+	a1.Position = Vector3.new(BAT_TIP - barrelCenter, 0, 0)
+	a1.Parent = barrel
+	local trail = Instance.new("Trail")
+	trail.Attachment0 = a0
+	trail.Attachment1 = a1
+	trail.Lifetime = 0.18
+	trail.MinLength = 0.05
+	trail.LightEmission = 0.6
+	trail.Color = ColorSequence.new(color:Lerp(Color3.new(1, 1, 1), 0.6))
+	trail.Transparency = NumberSequence.new(0.35, 1)
+	trail.Enabled = false
+	trail.Parent = barrel
 	model.Parent = workspace
 
-	visualBat, visualBatHand, visualBatStyle = model, hand, style
+	visualBat, visualBatHand, visualBatStyle, batTrail = model, hand, style, trail
 end
 
-local posedChar = nil
-local posedJoints = nil
+---------------------------------------------------------------------
+-- The swing: who's swinging, and what pose they're in right now
+---------------------------------------------------------------------
+local swingStates = {}  -- [userId] = { time = when the swing started, from = the pose it started from }
+local prepPitches = {}  -- [userId] = { startTime, arrive } for the pitch coming at that batter
+local posed = {}        -- the batter we're posing: { char, joints, rig }
+
+local JOINT_LIST = {
+	{ "root", "LowerTorso", "Root" }, { "waist", "UpperTorso", "Waist" }, { "neck", "Head", "Neck" },
+	{ "rShoulder", "RightUpperArm", "RightShoulder" }, { "rElbow", "RightLowerArm", "RightElbow" }, { "rWrist", "RightHand", "RightWrist" },
+	{ "lShoulder", "LeftUpperArm", "LeftShoulder" }, { "lElbow", "LeftLowerArm", "LeftElbow" }, { "lWrist", "LeftHand", "LeftWrist" },
+	{ "rHip", "RightUpperLeg", "RightHip" }, { "rKnee", "RightLowerLeg", "RightKnee" }, { "rAnkle", "RightFoot", "RightAnkle" },
+	{ "lHip", "LeftUpperLeg", "LeftHip" }, { "lKnee", "LeftLowerLeg", "LeftKnee" }, { "lAnkle", "LeftFoot", "LeftAnkle" },
+}
+
+-- Finds all 15 joints of an R15 avatar (nil for R6 avatars or if it hasn't loaded yet)
+local function getJoints(char)
+	local joints = {}
+	for _, info in JOINT_LIST do
+		local part = char:FindFirstChild(info[2])
+		local joint = part and part:FindFirstChild(info[3])
+		if not (joint and joint:IsA("Motor6D")) then
+			return nil
+		end
+		joints[info[1]] = joint
+	end
+	return joints
+end
+
+local function smooth(a)
+	a = math.clamp(a, 0, 1)
+	return a * a * (3 - 2 * a)
+end
+
+-- The batter's pose right now: swinging, getting ready for a pitch, or waiting with a little bat waggle
+local function poseFor(userId, now)
+	local s = swingStates[userId]
+	if s then
+		local t = now - s.time
+		if t < Swing.SWING_TIME then
+			return Swing.sample(Swing.SWING_KEYS, t, s.from)
+		end
+		swingStates[userId] = nil
+	end
+	local p = prepPitches[userId]
+	if p then
+		local afterPlate = now - p.arrive
+		if afterPlate < 0.35 then
+			return Swing.sample(Swing.PREP_KEYS, now - p.startTime)
+		elseif afterPlate < 0.8 then
+			local held = Swing.sample(Swing.PREP_KEYS, p.arrive + 0.35 - p.startTime)
+			return Swing.blend(held, Swing.STANCE, smooth((afterPlate - 0.35) / 0.45))
+		end
+		prepPitches[userId] = nil
+	end
+	local waggle = Swing.blend(Swing.STANCE, Swing.STANCE, 0)
+	waggle.batYaw += math.sin(now * 2.2) * 4
+	waggle.grip += Vector3.new(0, math.sin(now * 2.2 + 1) * 0.03, 0)
+	return waggle
+end
+
+local function startSwing(userId)
+	local now = workspace:GetServerTimeNow()
+	swingStates[userId] = { time = now, from = poseFor(userId, now) }
+	prepPitches[userId] = nil
+end
+
+-- Optional Toolbox swing animation (only your own avatar loads it; Roblox shows it to everyone)
+local animTrack = nil
+local animTrackChar = nil
+local animFailed = SWING_ANIMATION_ID == 0
+
+local function animationFailed(reason)
+	if not animFailed then
+		animFailed = true
+		warn("[Baseball] The swing animation " .. tostring(SWING_ANIMATION_ID) .. " didn't work (" .. reason
+			.. "). Using the built-in swing instead. Try a different animation, or set SWING_ANIMATION_ID back to 0.")
+	end
+end
+
+local function getSwingTrack()
+	if animFailed then
+		return nil
+	end
+	local char = player.Character
+	if animTrack and animTrackChar == char then
+		return animTrack
+	end
+	animTrack, animTrackChar = nil, char
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local animator = hum and hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		return nil
+	end
+	local anim = Instance.new("Animation")
+	anim.AnimationId = "rbxassetid://" .. tostring(SWING_ANIMATION_ID)
+	local ok, track = pcall(function()
+		return animator:LoadAnimation(anim)
+	end)
+	if not ok or not track then
+		animationFailed("it wouldn't load")
+		return nil
+	end
+	track.Priority = Enum.AnimationPriority.Action4
+	track.Looped = false
+	animTrack = track
+	return track
+end
+
+local function playSwingAnimation()
+	local track = getSwingTrack()
+	if not track then
+		return
+	end
+	track:Play(0.05)
+	task.delay(1.5, function()
+		if track.Length == 0 then
+			animationFailed("it never loaded - it might not be allowed in this game")
+		end
+	end)
+end
+
+-- Is the batter's Toolbox animation moving them right now? Then we leave their body alone.
+local function swingAnimationPlaying(batterPlayer, char)
+	if SWING_ANIMATION_ID == 0 then
+		return false
+	end
+	if batterPlayer == player then
+		return animTrack ~= nil and animTrack.IsPlaying and animTrack.Length > 0
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local animator = hum and hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		return false
+	end
+	for _, track in animator:GetPlayingAnimationTracks() do
+		local anim = track.Animation
+		if anim and string.find(anim.AnimationId, tostring(SWING_ANIMATION_ID), 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function releasePose()
+	if posed.joints then
+		pcall(Swing.reset, posed.joints)
+	end
+	posed = {}
+end
 
 RunService.Stepped:Connect(function()
 	local batterId = remotes:GetAttribute("BatterUserId") or 0
@@ -637,32 +1411,32 @@ RunService.Stepped:Connect(function()
 	local char = batterPlayer and batterPlayer.Character
 	if not batterPlayer or not char then
 		removeVisualBat()
-		posedChar = nil
+		releasePose()
 		return
 	end
 	updateVisualBat(batterPlayer, char)
 
-	if char ~= posedChar or not (posedJoints.rShoulder and posedJoints.rShoulder.Parent) then
-		posedChar = char
-		posedJoints = getJoints(char)
+	local now = workspace:GetServerTimeNow()
+	if posed.char ~= char or (not posed.joints and os.clock() - (posed.lastTry or 0) > 1) then
+		releasePose()
+		local joints = getJoints(char)
+		posed = { char = char, joints = joints, rig = joints and Swing.measure(joints), lastTry = os.clock() }
 	end
-
-	local pose = STANCE
-	local started = swingStarts[batterId]
-	if started then
-		local elapsed = os.clock() - started
-		if elapsed < SWING_TIME then
-			pose = poseAt(elapsed)
-		else
-			swingStarts[batterId] = nil
-		end
+	local s = swingStates[batterId]
+	if batTrail then
+		batTrail.Enabled = s ~= nil and now - s.time < 0.4
 	end
-	applyPose(posedJoints, pose)
+	if not posed.joints or not posed.joints.root.Parent then
+		return -- R6 avatar or still loading: the bat just stays in the hand
+	end
+	if swingAnimationPlaying(batterPlayer, char) then
+		return
+	end
+	Swing.apply(posed.joints, posed.rig, poseFor(batterId, now))
 end)
 
 ---------------------------------------------------------------------
--- The pitching machine (spinning wheels + a light that flashes before each pitch)
--- and the crowd (they jump when someone hits a home run)
+-- The ROBO-PITCHER arm and light, and the crowd
 ---------------------------------------------------------------------
 -- Roblox loads far-away parts a little at a time, so we look these up when they show up
 -- instead of waiting for them.
@@ -670,28 +1444,69 @@ local LIGHT_READY = Color3.fromRGB(60, 255, 90)
 local LIGHT_FIRE = Color3.fromRGB(255, 50, 50)
 
 local stadium = nil
-local machineParts = nil
+local machineInfo = nil
 local lastMachineLookup = 0
-local wheelAngle = 0
-local wheelsFastUntil = 0
-local lightBlinkUntil = 0
+local armPitch = nil -- { startTime, golden } of the last pitch
 
 local function findMachine()
 	stadium = stadium or workspace:FindFirstChild("BaseballField")
 	local machine = stadium and stadium:FindFirstChild("PitchingMachine")
-	local left = machine and machine:FindFirstChild("WheelLeft")
-	local right = machine and machine:FindFirstChild("WheelRight")
+	local arm = machine and machine:FindFirstChild("Arm")
 	local light = machine and machine:FindFirstChild("PitchLight")
-	if left and right and light then
-		machineParts = { left = left, right = right, light = light, leftHome = left.CFrame, rightHome = right.CFrame }
+	local pivotCF = machine and machine:GetAttribute("PivotCF")
+	if not (arm and light and typeof(pivotCF) == "CFrame") then
+		return
 	end
+	local parts = {}
+	for _, part in arm:GetChildren() do
+		local offset = part:GetAttribute("ArmOffset")
+		if part:IsA("BasePart") and typeof(offset) == "CFrame" then
+			table.insert(parts, { part = part, offset = offset })
+		end
+	end
+	if #parts == 0 then
+		return
+	end
+	machineInfo = {
+		light = light,
+		pivotCF = pivotCF,
+		armLength = machine:GetAttribute("ArmLength") or 2.9,
+		ballLead = machine:GetAttribute("BallLead") or 0.55,
+		releaseDeg = machine:GetAttribute("ReleaseDeg") or 8,
+		restDeg = machine:GetAttribute("RestDeg") or -180,
+		parts = parts,
+	}
 end
 
-local cheerParts, cheerHomes, cheerPhases = {}, {}, {}
+-- Arm angle (degrees) at time T from when the ball leaves. 0 = arm straight up.
+-- It creeps back during the wind-up, whips over the top, lets go, and follows through.
+local function armAngle(T)
+	local m = machineInfo
+	local rest = m.restDeg
+	local release = m.releaseDeg
+	if T < -PITCH_LEAD or T >= 0.35 then
+		return rest + math.sin(os.clock() * 1.5) * 3
+	elseif T < -0.16 then
+		local a = smooth((T + PITCH_LEAD) / math.max(PITCH_LEAD - 0.16, 0.01))
+		return rest + 70 * a
+	elseif T < 0 then
+		local u = (T + 0.16) / 0.16
+		return rest + 70 + (release - rest - 70) * u * u
+	end
+	local v = T / 0.35
+	return release + (rest + 360 - release) * (1 - (1 - v) * (1 - v))
+end
+
+local function cupPosition(angle)
+	local m = machineInfo
+	return (m.pivotCF * CFrame.Angles(math.rad(angle), 0, 0)) * Vector3.new(0, m.armLength, m.ballLead)
+end
+
+local cheerParts, cheerHomes, cheerPhases, cheerHops = {}, {}, {}, {}
 local cheerUntil = 0
 local cheering = false
 
-local function startCheer(seconds)
+local function startCheer(seconds, landPos)
 	stadium = stadium or workspace:FindFirstChild("BaseballField")
 	local crowdFolder = stadium and stadium:FindFirstChild("Crowd")
 	if not crowdFolder then
@@ -701,34 +1516,41 @@ local function startCheer(seconds)
 		table.clear(cheerParts)
 		table.clear(cheerHomes)
 		table.clear(cheerPhases)
+		table.clear(cheerHops)
 		for _, part in crowdFolder:GetChildren() do
 			if part:IsA("BasePart") then
 				table.insert(cheerParts, part)
 				table.insert(cheerHomes, part.CFrame)
 				table.insert(cheerPhases, part:GetAttribute("Phase") or 0)
+				-- Fans near where the ball landed go crazy
+				local near = if landPos then math.max(0, 1 - (part.Position - landPos).Magnitude / 45) else 0
+				table.insert(cheerHops, 1.6 * (1 + 2 * near))
 			end
 		end
 	end
 	cheerUntil = os.clock() + seconds
 end
 
-RunService.RenderStepped:Connect(function(dt)
+RunService.RenderStepped:Connect(function()
 	local now = os.clock()
 
 	-- Pitching machine
-	local m = machineParts
-	if (not m or not m.left.Parent or not m.right.Parent or not m.light.Parent) and now - lastMachineLookup > 1 then
+	local m = machineInfo
+	if (not m or not m.light.Parent or not m.parts[1].part.Parent) and now - lastMachineLookup > 1 then
 		lastMachineLookup = now
-		machineParts = nil
+		machineInfo = nil
 		findMachine()
-		m = machineParts
+		m = machineInfo
 	end
 	if m then
-		wheelAngle += dt * (if now < wheelsFastUntil then 35 else 4)
-		m.left.CFrame = m.leftHome * CFrame.Angles(wheelAngle, 0, 0)
-		m.right.CFrame = m.rightHome * CFrame.Angles(-wheelAngle, 0, 0)
-		local blinkOn = now < lightBlinkUntil and math.floor(now * 12) % 2 == 0
-		m.light.Color = if blinkOn then LIGHT_FIRE else LIGHT_READY
+		local T = if armPitch then workspace:GetServerTimeNow() - armPitch.startTime else -99
+		local spin = m.pivotCF * CFrame.Angles(math.rad(armAngle(T)), 0, 0)
+		for _, info in m.parts do
+			info.part.CFrame = spin * info.offset
+		end
+		local windingUp = T >= -PITCH_LEAD and T < 0
+		local blinkOn = windingUp and math.floor(now * 12) % 2 == 0
+		m.light.Color = if blinkOn then (if armPitch.golden then GOLD else LIGHT_FIRE) else LIGHT_READY
 	end
 
 	-- Crowd jumping
@@ -736,7 +1558,7 @@ RunService.RenderStepped:Connect(function(dt)
 		cheering = true
 		local moved = table.create(#cheerParts)
 		for i, home in cheerHomes do
-			local hop = math.max(0, math.sin(now * 14 + cheerPhases[i])) * 1.6
+			local hop = math.max(0, math.sin(now * 14 + cheerPhases[i])) * cheerHops[i]
 			moved[i] = home + Vector3.new(0, hop, 0)
 		end
 		pcall(function()
@@ -748,6 +1570,16 @@ RunService.RenderStepped:Connect(function(dt)
 			workspace:BulkMoveTo(cheerParts, cheerHomes, Enum.BulkMoveMode.FireCFrameChanged)
 		end)
 	end
+
+	-- Timing meter: the white ball slides toward the green zone
+	local p = currentPitch
+	if batting and p and meter.Visible then
+		local fromPlate = workspace:GetServerTimeNow() - p.arrive
+		meterBall.Visible = fromPlate > -METER_EARLY - 0.2 and fromPlate < METER_LATE + 0.2
+		meterBall.Position = UDim2.new(meterX(fromPlate), 0, 0.5, 0)
+	else
+		meterBall.Visible = false
+	end
 end)
 
 ---------------------------------------------------------------------
@@ -755,24 +1587,24 @@ end)
 ---------------------------------------------------------------------
 local balls = {} -- pitch id -> the ball for that pitch
 
-local function makeBall(withTrail)
+local function makeBall(trailColor, golden)
 	local ball = Instance.new("Part")
 	ball.Name = "Baseball"
 	ball.Shape = Enum.PartType.Ball
-	ball.Size = Vector3.new(0.9, 0.9, 0.9)
-	ball.Color = Color3.fromRGB(250, 250, 245)
-	ball.Material = Enum.Material.SmoothPlastic
+	ball.Size = Vector3.new(0.85, 0.85, 0.85)
+	ball.Color = if golden then GOLD else Color3.fromRGB(250, 250, 245)
+	ball.Material = if golden then Enum.Material.Neon else Enum.Material.SmoothPlastic
 	ball.Anchored = true
 	ball.CanCollide = false
 	ball.CanQuery = false
 	ball.CanTouch = false
 	ball.CastShadow = false
-	if withTrail then
+	if trailColor then
 		local a0 = Instance.new("Attachment")
-		a0.Position = Vector3.new(0, 0.35, 0)
+		a0.Position = Vector3.new(0, 0.3, 0)
 		a0.Parent = ball
 		local a1 = Instance.new("Attachment")
-		a1.Position = Vector3.new(0, -0.35, 0)
+		a1.Position = Vector3.new(0, -0.3, 0)
 		a1.Parent = ball
 		local trail = Instance.new("Trail")
 		trail.Attachment0 = a0
@@ -780,9 +1612,20 @@ local function makeBall(withTrail)
 		trail.Lifetime = 0.4
 		trail.FaceCamera = true
 		trail.LightEmission = 0.6
-		trail.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(255, 210, 60))
+		trail.Color = ColorSequence.new(Color3.new(1, 1, 1), trailColor)
 		trail.Transparency = NumberSequence.new(0.1, 1)
 		trail.Parent = ball
+	end
+	if golden then
+		local sparkle = Instance.new("ParticleEmitter")
+		sparkle.Rate = 40
+		sparkle.Lifetime = NumberRange.new(0.3, 0.5)
+		sparkle.Speed = NumberRange.new(1, 3)
+		sparkle.SpreadAngle = Vector2.new(180, 180)
+		sparkle.Size = NumberSequence.new(0.35, 0)
+		sparkle.Color = ColorSequence.new(GOLD)
+		sparkle.LightEmission = 1
+		sparkle.Parent = ball
 	end
 	ball.Parent = workspace
 	return ball
@@ -793,32 +1636,41 @@ local function curvePoint(a, b, c, t)
 end
 
 PitchEvent.OnClientEvent:Connect(function(data)
-	local ball = makeBall(false)
+	local ball = makeBall(Color3.fromRGB(220, 220, 220), data.golden)
 	ball.Position = data.startPos
 	balls[data.id] = ball
+	armPitch = { startTime = data.startTime, golden = data.golden }
+	prepPitches[data.batterUserId] = { startTime = data.startTime, arrive = data.startTime + data.duration }
 
 	local control = (data.startPos + data.endPos) / 2 + data.bend
 	if data.batterUserId == player.UserId then
 		currentPitch = { id = data.id, startTime = data.startTime, arrive = data.startTime + data.duration, swung = false }
+		swingTick.Visible = false
+		meterLabel.Text = ""
 	end
-	pitchLabel.Text = string.format("%d MPH %s", data.mph, data.name)
+	pitchLabel.Text = string.format("%d MPH %s%s", data.mph, data.name, if data.golden then "  -  GOLDEN BALL!" else "")
+	pitchLabel.TextColor3 = if data.golden then GOLD else (data.color or Color3.fromRGB(255, 220, 120))
 
-	-- Machine winds up: light blinks red, wheels spin fast
-	local windUp = math.max(0, data.startTime - workspace:GetServerTimeNow())
-	lightBlinkUntil = os.clock() + windUp
-	wheelsFastUntil = os.clock() + windUp + 0.8
-
+	local wobble = data.wobble or 0
+	local seed = data.id * 1.7
 	local conn
 	conn = RunService.RenderStepped:Connect(function()
 		if balls[data.id] ~= ball then
 			conn:Disconnect() -- it got hit, the flying ball takes over
 			return
 		end
-		local alpha = (workspace:GetServerTimeNow() - data.startTime) / data.duration
+		local T = workspace:GetServerTimeNow() - data.startTime
+		local alpha = T / data.duration
 		if alpha < 0 then
-			ball.Position = data.startPos
+			-- still in the machine's cup during the wind-up
+			ball.Position = if machineInfo then cupPosition(armAngle(T)) else data.startPos
 		elseif alpha <= 1 then
-			ball.Position = curvePoint(data.startPos, control, data.endPos, alpha)
+			local pos = curvePoint(data.startPos, control, data.endPos, alpha)
+			if wobble > 0 then
+				local fade = alpha * (1 - alpha) * 4
+				pos += Vector3.new(math.sin(T * 23 + seed) * wobble * fade, math.cos(T * 17 + seed * 2) * wobble * 0.7 * fade, 0)
+			end
+			ball.Position = pos
 		elseif alpha < 1.4 then
 			-- missed it: keep flying past the plate
 			ball.Position = data.endPos + (data.endPos - control) * 2 * (alpha - 1)
@@ -830,6 +1682,64 @@ PitchEvent.OnClientEvent:Connect(function(data)
 	end)
 end)
 
+-- A glowing ring and the distance where a home run came down
+local function landingMarker(pos, distance)
+	local ring = Instance.new("Part")
+	ring.Name = "LandingSpot"
+	ring.Shape = Enum.PartType.Cylinder
+	ring.Size = Vector3.new(0.2, 6, 6)
+	ring.CFrame = CFrame.new(pos + Vector3.new(0, 0.3, 0)) * CFrame.Angles(0, 0, math.rad(90))
+	ring.Anchored = true
+	ring.CanCollide = false
+	ring.CanQuery = false
+	ring.CanTouch = false
+	ring.Material = Enum.Material.Neon
+	ring.Color = GOLD
+	ring.Transparency = 0.35
+	ring.Parent = workspace
+	local sign = Instance.new("BillboardGui")
+	sign.Size = UDim2.new(0, 200, 0, 60)
+	sign.StudsOffset = Vector3.new(0, 7, 0)
+	sign.AlwaysOnTop = true
+	sign.LightInfluence = 0
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.LuckiestGuy
+	label.TextScaled = true
+	label.TextColor3 = GOLD
+	label.Text = distance .. " FT"
+	addStroke(label, 3)
+	label.Parent = sign
+	sign.Parent = ring
+	TweenService:Create(ring, TweenInfo.new(4, Enum.EasingStyle.Quad, Enum.EasingDirection.In), { Transparency = 1, Size = Vector3.new(0.2, 12, 12) }):Play()
+	Debris:AddItem(ring, 4.2)
+end
+
+local function contactBurst(pos, color)
+	local holder = Instance.new("Part")
+	holder.Anchored = true
+	holder.CanCollide = false
+	holder.CanQuery = false
+	holder.CanTouch = false
+	holder.Transparency = 1
+	holder.Size = Vector3.new(0.5, 0.5, 0.5)
+	holder.Position = pos
+	holder.Parent = workspace
+	local sparks = Instance.new("ParticleEmitter")
+	sparks.Rate = 0
+	sparks.Speed = NumberRange.new(12, 22)
+	sparks.SpreadAngle = Vector2.new(60, 60)
+	sparks.Lifetime = NumberRange.new(0.15, 0.3)
+	sparks.Size = NumberSequence.new(0.5, 0)
+	sparks.Color = ColorSequence.new(color)
+	sparks.LightEmission = 1
+	sparks.EmissionDirection = Enum.NormalId.Front
+	sparks.Parent = holder
+	sparks:Emit(24)
+	Debris:AddItem(holder, 1)
+end
+
 local function flyBall(info)
 	local pitchBall = balls[info.pitchId]
 	if pitchBall then
@@ -837,19 +1747,52 @@ local function flyBall(info)
 		balls[info.pitchId] = nil
 	end
 
-	local ball = makeBall(true)
+	local batterPlayer = Players:GetPlayerByUserId(info.batterUserId)
+	local batItem = ITEMS[batterPlayer and batterPlayer:GetAttribute("EquippedBat") or "wood"]
+	local trailColor = if info.golden then GOLD elseif batItem then batItem.color else Color3.fromRGB(255, 210, 60)
+	local ball = makeBall(trailColor, info.golden)
 	ball.Position = info.launchPos
-	if info.batterUserId == player.UserId and batting then
+	contactBurst(info.launchPos, trailColor)
+	playSound(HIT_SOUND_ID, 1)
+	local mine = info.batterUserId == player.UserId and batting
+	if mine then
 		followBall = ball
+	end
+
+	-- After it lands: one bounce (off the wall it bounces back), then it rests
+	local T = info.flightTime
+	local g = info.gravity
+	local landPos = info.launchPos + info.velocity * T + Vector3.new(0, -0.5 * g * T * T, 0)
+	local landVel = info.velocity + Vector3.new(0, -g * T, 0)
+	local bounceVel
+	if info.kind == "WALL" then
+		bounceVel = Vector3.new(-landVel.X * 0.25, math.max(math.abs(landVel.Y) * 0.3, 6), -landVel.Z * 0.25)
+	else
+		bounceVel = Vector3.new(landVel.X * 0.3, math.abs(landVel.Y) * 0.3, landVel.Z * 0.3)
+	end
+	local bounceTime = 2 * bounceVel.Y / g
+	if info.kind == "WALL" then
+		-- falls all the way down to the warning track
+		local h = landPos.Y - 0.45
+		bounceTime = (bounceVel.Y + math.sqrt(bounceVel.Y * bounceVel.Y + 2 * g * math.max(h, 0))) / g
 	end
 
 	local start = os.clock()
 	local conn
 	conn = RunService.RenderStepped:Connect(function()
 		local elapsed = os.clock() - start
-		local t = math.min(elapsed, info.flightTime)
-		ball.Position = info.launchPos + info.velocity * t + Vector3.new(0, -0.5 * info.gravity * t * t, 0)
-		if elapsed > info.flightTime + 1.2 then
+		if elapsed <= T then
+			ball.Position = info.launchPos + info.velocity * elapsed + Vector3.new(0, -0.5 * g * elapsed * elapsed, 0)
+		elseif info.kind ~= "FOUL" and elapsed <= T + bounceTime then
+			local b = elapsed - T
+			ball.Position = landPos + bounceVel * b + Vector3.new(0, -0.5 * g * b * b, 0)
+		end
+		if mine and followBall == ball and elapsed > T + 0.3 then
+			followBall = nil
+			holdLookPos = ball.Position
+			holdLookUntil = os.clock() + 1.1
+		end
+		if elapsed > T + bounceTime + 1.5 then
 			conn:Disconnect()
 			if followBall == ball then
 				followBall = nil
@@ -857,6 +1800,9 @@ local function flyBall(info)
 			ball:Destroy()
 		end
 	end)
+	if info.kind == "HOMER" and info.landPos then
+		task.delay(T, landingMarker, info.landPos, info.distance)
+	end
 end
 
 ---------------------------------------------------------------------
@@ -888,12 +1834,48 @@ local function firework(pos, color)
 	Debris:AddItem(holder, 3)
 end
 
+-- Paper confetti falling down your screen
+local function confetti()
+	for _ = 1, 50 do
+		local bit = Instance.new("Frame")
+		bit.AnchorPoint = Vector2.new(0.5, 0.5)
+		bit.Size = UDim2.new(0, math.random(8, 14), 0, math.random(14, 22))
+		bit.Position = UDim2.new(math.random(), 0, 0, -30)
+		bit.Rotation = math.random(0, 360)
+		bit.BackgroundColor3 = Color3.fromHSV(math.random(), 0.8, 1)
+		bit.BorderSizePixel = 0
+		bit.ZIndex = 5
+		bit.Parent = root
+		local fall = TweenInfo.new(1.6 + math.random() * 1.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+		TweenService:Create(bit, fall, {
+			Position = UDim2.new(bit.Position.X.Scale + (math.random() - 0.5) * 0.2, 0, 1, 40),
+			Rotation = bit.Rotation + math.random(-360, 360),
+		}):Play()
+		Debris:AddItem(bit, 3)
+	end
+end
+
 local celebrateToken = 0
 local function celebrate(info)
 	celebrateToken += 1
 	local token = celebrateToken
+	local mine = info.batterUserId == player.UserId
 
 	homerSub.Text = string.format("%s - %s", info.batterName, info.text)
+	local extras = {}
+	if info.streak and info.streak >= 2 then
+		table.insert(extras, string.format("%d IN A ROW!", info.streak))
+	end
+	if info.golden then
+		table.insert(extras, "GOLDEN BALL!")
+	end
+	if mine and info.firstHomer then
+		table.insert(extras, "YOUR FIRST HOME RUN!")
+	elseif mine and info.newBest then
+		table.insert(extras, "NEW PERSONAL BEST!")
+	end
+	homerExtra.Text = table.concat(extras, "  ")
+	homerExtra.Visible = #extras > 0
 	homerLabel.Text = "HOMERUN"
 	homerLabel.Rotation = 0
 	homerLabel.Visible = true
@@ -901,24 +1883,18 @@ local function celebrate(info)
 	homerScale.Scale = 0.2
 	TweenService:Create(homerScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
 
-	if info.batterUserId == player.UserId then
+	if mine then
 		shakeUntil = os.clock() + 0.6
+		confetti()
 	end
-	startCheer(3.5)
-
-	if HOMER_SOUND_ID ~= 0 then
-		local sound = Instance.new("Sound")
-		sound.SoundId = "rbxassetid://" .. HOMER_SOUND_ID
-		sound.Volume = 1
-		sound.Parent = SoundService
-		sound:Play()
-		Debris:AddItem(sound, 15)
-	end
+	startCheer(4, info.landPos)
+	playSound(HOMER_SOUND_ID, 1)
+	playSound(CROWD_SOUND_ID, 0.8)
 
 	for i = 1, 8 do
 		local angle = math.rad(math.random(-40, 40))
 		local dir = Vector3.new(math.sin(angle), 0, -math.cos(angle))
-		local pos = HOME + dir * (FENCE_DIST + math.random(-10, 30)) + Vector3.new(0, math.random(40, 75), 0)
+		local pos = HOME + dir * (FENCE_DIST + math.random(-10, 40)) + Vector3.new(0, math.random(50, 90), 0)
 		task.delay(i * 0.18, firework, pos, Color3.fromHSV(math.random(), 0.8, 1))
 	end
 
@@ -940,6 +1916,7 @@ local function celebrate(info)
 		if token == celebrateToken then
 			homerLabel.Visible = false
 			homerSub.Visible = false
+			homerExtra.Visible = false
 		end
 	end)
 end
@@ -956,6 +1933,27 @@ local RESULT_COLORS = {
 	ROUNDOVER = Color3.fromRGB(90, 220, 255),
 }
 
+-- Where your swing landed on the timing meter
+local function showSwingTiming(offset, hitKind)
+	local window = SWING_WINDOW * batTiming()
+	swingTick.Position = UDim2.new(meterX(offset), 0, 0.5, 0)
+	swingTick.Visible = true
+	local quality = 1 - math.abs(offset) / window
+	if hitKind == "WHIFF" then
+		swingTick.BackgroundColor3 = RED
+		meterLabel.Text = if offset < 0 then "TOO EARLY" else "TOO LATE"
+		meterLabel.TextColor3 = RED
+	elseif quality > 0.9 then
+		swingTick.BackgroundColor3 = GOLD
+		meterLabel.Text = "PERFECT!"
+		meterLabel.TextColor3 = GOLD
+	else
+		swingTick.BackgroundColor3 = Color3.new(1, 1, 1)
+		meterLabel.Text = if offset < 0 then "A LITTLE EARLY" else "A LITTLE LATE"
+		meterLabel.TextColor3 = Color3.new(1, 1, 1)
+	end
+end
+
 ResultEvent.OnClientEvent:Connect(function(info)
 	local mine = info.batterUserId == player.UserId
 	if currentPitch and currentPitch.id == info.pitchId then
@@ -963,13 +1961,18 @@ ResultEvent.OnClientEvent:Connect(function(info)
 	end
 	-- Other players see the batter swing (your own swing already started when you clicked)
 	if info.swung and not mine then
-		swingStarts[info.batterUserId] = os.clock()
+		startSwing(info.batterUserId)
+	end
+	if mine and info.swung and typeof(info.offset) == "number" then
+		showSwingTiming(info.offset, info.kind)
 	end
 	if info.launchPos then
 		flyBall(info)
+		local who = if mine then "" else info.batterName .. ":  "
+		showStats(string.format("%sEXIT VELO %d MPH  |  LAUNCH %d°  |  %d FT", who, info.exitVelo or 0, info.launchDeg or 0, info.distance or 0))
 	end
 	if mine and (info.earned or 0) > 0 then
-		showEarned(info.earned, info.lucky)
+		showEarned(info.earned, info.lucky, info.golden)
 	end
 	if info.kind == "HOMER" then
 		celebrate(info)
@@ -979,11 +1982,15 @@ ResultEvent.OnClientEvent:Connect(function(info)
 			text = info.batterName .. ": " .. text
 		end
 		showMessage(text, RESULT_COLORS[info.kind] or Color3.new(1, 1, 1))
+		if info.kind == "ROUNDOVER" and mine then
+			showRoundSummary(info)
+		end
 	end
 end)
 
 ---------------------------------------------------------------------
--- Swinging: mouse click, SPACE or F on a keyboard, tap or the SWING button on a phone/tablet
+-- Swinging: mouse click, SPACE or F on a keyboard, R2 or A on a controller,
+-- tap or the SWING button on a phone/tablet
 ---------------------------------------------------------------------
 local function trySwing()
 	if not batting then
@@ -994,12 +2001,14 @@ local function trySwing()
 	if p and now < p.startTime then
 		return -- the ball hasn't been thrown yet, so wait for it
 	end
-	local started = swingStarts[player.UserId]
-	if started and os.clock() - started < SWING_TIME then
+	local s = swingStates[player.UserId]
+	if s and now - s.time < Swing.SWING_TIME * 0.75 then
 		return -- still finishing the last swing
 	end
 
-	swingStarts[player.UserId] = os.clock()
+	startSwing(player.UserId)
+	playSwingAnimation()
+	playSound(SWING_SOUND, 0.6)
 	if not p or p.swung then
 		return -- practice swing, no pitch to hit
 	end
@@ -1011,16 +2020,41 @@ local function trySwing()
 	SwingEvent:FireServer(p.id, offset)
 end
 
+local function toggleShop()
+	setShopOpen(not shopFrame.Visible)
+end
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
 	local inputType = input.UserInputType
+	local key = input.KeyCode
 	if inputType == Enum.UserInputType.MouseButton1 or inputType == Enum.UserInputType.Touch then
-		if not gameProcessed then
+		if not gameProcessed and not shopFrame.Visible then
 			trySwing()
 		end
 	elseif inputType == Enum.UserInputType.Keyboard then
-		local key = input.KeyCode
-		if (key == Enum.KeyCode.Space or key == Enum.KeyCode.F) and UserInputService:GetFocusedTextBox() == nil then
+		if UserInputService:GetFocusedTextBox() ~= nil then
+			return -- typing in chat
+		end
+		if key == Enum.KeyCode.Space or key == Enum.KeyCode.F then
 			trySwing()
+		elseif key == Enum.KeyCode.E then
+			toggleShop()
+		elseif key == Enum.KeyCode.Q then
+			leaveBox()
+		end
+	elseif string.find(inputType.Name, "Gamepad") then
+		if key == Enum.KeyCode.ButtonR2 or key == Enum.KeyCode.ButtonA then
+			if not shopFrame.Visible then
+				trySwing()
+			end
+		elseif key == Enum.KeyCode.ButtonY then
+			toggleShop()
+		elseif key == Enum.KeyCode.ButtonB then
+			if shopFrame.Visible then
+				setShopOpen(false)
+			else
+				leaveBox()
+			end
 		end
 	end
 end)
