@@ -1,0 +1,95 @@
+name: Claude Session Auto-PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_name:
+        description: "Claude session name or task"
+        required: true
+        type: string
+      branch_name:
+        description: "Branch name (optional; auto-generated if empty)"
+        required: false
+        type: string
+      pr_title:
+        description: "PR title"
+        required: true
+        type: string
+      pr_body:
+        description: "PR description"
+        required: false
+        type: string
+      files_json:
+        description: 'JSON array of files to create/update, e.g. [{"path":"src/Test.lua","content":"print(\"hi\")"}]'
+        required: true
+        type: string
+
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate branch name
+        id: branch
+        shell: bash
+        run: |
+          if [ -z "${{ github.event.inputs.branch_name }}" ]; then
+            BRANCH="claude-session-$(date +%s)"
+          else
+            BRANCH="${{ github.event.inputs.branch_name }}"
+          fi
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Create branch
+        shell: bash
+        run: |
+          git config user.name "Claude"
+          git config user.email "claude@anthropic.com"
+          git checkout -b "${{ steps.branch.outputs.name }}"
+
+      - name: Write files from session
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          files = json.loads("""${{ github.event.inputs.files_json }}""")
+          for item in files:
+              path = item["path"]
+              content = item.get("content", "")
+              directory = os.path.dirname(path)
+              if directory:
+                  os.makedirs(directory, exist_ok=True)
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(content)
+          PY
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          git add -A
+          git commit -m "Claude session: ${{ github.event.inputs.session_name }}" || echo "No changes to commit"
+
+      - name: Push branch
+        shell: bash
+        run: |
+          git push https://x-access-token:${{ secrets.ADMIN_PAT }}@github.com/${{ github.repository }} "${{ steps.branch.outputs.name }}"
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.ADMIN_PAT }}
+          branch: ${{ steps.branch.outputs.name }}
+          title: "${{ github.event.inputs.pr_title }}"
+          body: |
+            ## Claude Session
+            **Session:** ${{ github.event.inputs.session_name }}
+
+            ${{ github.event.inputs.pr_body }}
