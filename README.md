@@ -12,7 +12,9 @@ ROBO-PITCHER 4000, the crowd, the shop, the screen buttons, the swing, and the s
 
 ## Install
 
-**Copy and paste (easiest):** open a new Baseplate place in Roblox Studio, then paste each
+**Open the game file (easiest):** open `HomeRunDerby.rbxlx` in Roblox Studio and press Play. All 4 scripts are already in place.
+
+**Copy and paste:** open a new Baseplate place in Roblox Studio, then paste each
 file into the place in the table above, as the kind of script the table says.
 
 **Rojo:** `rojo serve` with `default.project.json` puts the scripts in the same places

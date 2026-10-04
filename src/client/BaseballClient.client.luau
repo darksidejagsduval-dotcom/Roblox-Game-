@@ -83,26 +83,55 @@ end
 ---------------------------------------------------------------------
 local Swing: any = nil
 do
+	-- Looks for a ModuleScript named SwingAnimation (and notices one that's the wrong kind of script)
+	local function findSwingModule()
+		local wrongKind = nil
+		for _, obj in ReplicatedStorage:GetDescendants() do
+			if obj.Name == "SwingAnimation" then
+				if obj:IsA("ModuleScript") then
+					return obj, nil
+				end
+				wrongKind = wrongKind or obj
+			end
+		end
+		return nil, wrongKind
+	end
 	local started = os.clock()
-	local module = ReplicatedStorage:FindFirstChild("SwingAnimation", true)
+	local module, wrongKind = findSwingModule()
 	while not module and os.clock() - started < 5 do
 		task.wait(0.25)
-		module = ReplicatedStorage:FindFirstChild("SwingAnimation", true)
+		module, wrongKind = findSwingModule()
 	end
-	if module and module:IsA("ModuleScript") then
+	if module then
 		local ok, result = pcall(require, module)
-		if ok and type(result) == "table" then
-			Swing = result
-		else
-			warn("[Baseball] The SwingAnimation script has a problem: " .. tostring(result))
+		-- Make sure nothing important got deleted while changing the poses
+		local good = ok and type(result) == "table" and type(result.STANCE) == "table"
+			and type(result.SWING_KEYS) == "table" and type(result.PREP_KEYS) == "table"
+			and type(result.SWING_TIME) == "number" and type(result.HAND_SPREAD) == "number"
+		if good then
+			for _, name in { "apply", "sample", "blend", "measure", "reset" } do
+				if type(result[name]) ~= "function" then
+					good = false
+				end
+			end
 		end
+		if good then
+			Swing = result
+		elseif not ok then
+			warn("[Baseball] The SwingAnimation script has an error: " .. tostring(result) .. ". The batter will just hold the bat.")
+		else
+			warn("[Baseball] The SwingAnimation script is missing something (did a line get deleted?). The batter will just hold the bat.")
+		end
+	elseif wrongKind then
+		warn(string.format("[Baseball] SwingAnimation is a %s, but it has to be a ModuleScript. In ReplicatedStorage click + > ModuleScript, "
+			.. "name it SwingAnimation, paste Script 3 into it, and delete the %s.", wrongKind.ClassName, wrongKind.ClassName))
 	else
-		warn("[Baseball] Can't find the SwingAnimation ModuleScript in ReplicatedStorage. "
+		warn("[Baseball] Can't find the SwingAnimation ModuleScript in ReplicatedStorage (is it named exactly SwingAnimation?). "
 			.. "The batter will hold the bat but won't swing. Add Script 3 to fix it.")
 	end
 end
-local SWING_TIME = if Swing then Swing.SWING_TIME else 0.95
-local HAND_SPREAD = if Swing then Swing.HAND_SPREAD else 0.3
+local SWING_TIME = (Swing and tonumber(Swing.SWING_TIME)) or 0.95
+local HAND_SPREAD = (Swing and tonumber(Swing.HAND_SPREAD)) or 0.3
 
 ---------------------------------------------------------------------
 -- Computer, phone/tablet, or console?
@@ -1090,15 +1119,22 @@ local function poseFor(userId: number, now: number): any
 	return waggle
 end
 
+local disableSwing -- (filled in below) turns the swing off if the SwingAnimation script breaks
+
 local function startSwing(userId)
 	local now = workspace:GetServerTimeNow()
 	local from = nil
 	if Swing then
-		from = table.clone(poseFor(userId, now))
-		-- Right after a swing the bat has come all the way around. Count it from the front again
-		-- so the next swing doesn't spin the bat backward through the batter.
-		if from.batYaw > 180 then
-			from.batYaw -= 360
+		local ok, pose = pcall(poseFor, userId, now)
+		if ok and type(pose) == "table" then
+			from = table.clone(pose)
+			-- Right after a swing the bat has come all the way around. Count it from the front again
+			-- so the next swing doesn't spin the bat backward through the batter.
+			if type(from.batYaw) == "number" and from.batYaw > 180 then
+				from.batYaw -= 360
+			end
+		else
+			disableSwing(pose)
 		end
 	end
 	swingStates[userId] = { time = now, from = from }
@@ -1189,6 +1225,17 @@ local function releasePose()
 	posed = {}
 end
 
+-- If a number got typed wrong in the SwingAnimation script, the game keeps going:
+-- the batter just holds the bat, and Output says what happened (once).
+disableSwing = function(err)
+	if Swing then
+		warn("[Baseball] The SwingAnimation script has a problem: " .. tostring(err)
+			.. ". The batter will just hold the bat. (Check the numbers you changed in Script 3.)")
+		releasePose()
+		Swing = nil
+	end
+end
+
 RunService.Stepped:Connect(function()
 	local batterId = remotes:GetAttribute("BatterUserId") or 0
 	local batterPlayer = batterId ~= 0 and Players:GetPlayerByUserId(batterId) or nil
@@ -1204,19 +1251,33 @@ RunService.Stepped:Connect(function()
 	if posed.char ~= char or (not posed.joints and os.clock() - (posed.lastTry or 0) > 1) then
 		releasePose()
 		local joints = getJoints(char)
-		posed = { char = char, joints = joints, rig = joints and Swing and Swing.measure(joints), lastTry = os.clock() }
+		local rig = nil
+		if joints and Swing then
+			local ok, result = pcall(Swing.measure, joints)
+			if ok then
+				rig = result
+			else
+				disableSwing(result)
+			end
+		end
+		posed = { char = char, joints = joints, rig = rig, lastTry = os.clock() }
 	end
 	local s = swingStates[batterId]
 	if batTrail then
 		batTrail.Enabled = s ~= nil and now - s.time < 0.4
 	end
-	if not Swing or not posed.joints or not posed.joints.root.Parent then
+	if not Swing or not posed.joints or not posed.rig or not posed.joints.root.Parent then
 		return -- no swing script, R6 avatar, or still loading: the bat just stays in the hand
 	end
 	if swingAnimationPlaying(batterPlayer, char) then
 		return
 	end
-	Swing.apply(posed.joints, posed.rig, poseFor(batterId, now))
+	local ok, err = pcall(function()
+		Swing.apply(posed.joints, posed.rig, poseFor(batterId, now))
+	end)
+	if not ok then
+		disableSwing(err)
+	end
 end)
 
 ---------------------------------------------------------------------
