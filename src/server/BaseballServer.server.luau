@@ -1,9 +1,9 @@
 --[[
 	BaseballServer  (Script in ServerScriptService)
-	Warren's Home Run Derby, version 4.
-	Builds the whole stadium (bigger field, outfield bleachers full of fans), runs the
-	ROBO-PITCHER 4000 arm machine and its pitch screen, decides hits, keeps score,
-	runs the bat shop, and saves everyone's baseballs.
+	Warren's Home Run Derby, version 5.
+	Builds the whole stadium (bigger field, outfield bleachers full of fans, three outfielders),
+	runs the ROBO-PITCHER 4000 arm machine and its pitch screen, decides hits, sends the
+	outfielders after fly balls, keeps score, runs the bat shop, and saves everyone's baseballs.
 ]]
 
 local Players = game:GetService("Players")
@@ -27,9 +27,25 @@ local NIGHT_GAME = false     -- true = play under the night sky
 local GOLDEN_CHANCE = 0.08   -- chance a pitch is a GOLDEN BALL (0.08 = 8%)
 local GOLDEN_MULTIPLIER = 3  -- golden balls pay this many times more
 
+-- Outfielders chase fly balls and try to catch them. If the ball drops, it's a hit (not an out!)
+local FIELDERS_ON = true     -- false = no outfielders (every ball in the park is an out, like version 4)
+local FIELDER_SPEED = 30     -- how fast the outfielders run (studs per second). Faster = more catches
+local FIELDER_REACTION = 0.25 -- seconds before they start running
+local DIVE_REACH = 17        -- how far away a diving catch can reach (bigger = more diving catches)
+local INFIELD_DIST = 95      -- balls that land closer than this get caught by the infield (95 studs = 142 feet)
+-- Where the outfielders stand: deg = angle (0 = straight to center field, - = left field), dist = studs from home
+local FIELDER_SPOTS = {
+	{ name = "LF", title = "left fielder", field = "left field", number = 7, deg = -27, dist = 180 },
+	{ name = "CF", title = "center fielder", field = "center field", number = 8, deg = 0, dist = 200 },
+	{ name = "RF", title = "right fielder", field = "right field", number = 9, deg = 27, dist = 180 },
+}
+
 -- Baseballs you earn for hitting
 local REWARD_CONTACT = 3     -- any ball you hit
-local REWARD_WALL = 5        -- off the wall
+local REWARD_SINGLE = 4      -- the ball drops in and the fielder gets to it fast
+local REWARD_DOUBLE = 6      -- the fielder has to chase it (or it bounces off the wall)
+local REWARD_TRIPLE = 10     -- a long, long chase
+local REWARD_WALL = 5        -- off the wall (only when FIELDERS_ON = false; then it's an out)
 local REWARD_HOMER = 15      -- home run
 local REWARD_PERFECT = 5     -- extra for perfect timing
 local REWARD_STREAK = 5      -- extra for each home run in a row after the first
@@ -107,6 +123,19 @@ local EYE_DIST = FENCE_CENTER + 8
 local EYE_WIDTH = 80
 local EYE_HEIGHT = 40
 local EYE_HALF_DEG = math.deg(math.atan((EYE_WIDTH / 2) / EYE_DIST))
+
+-- Outfielder bodies: blocky ballplayers. Every piece hangs off one of 5 pivots (body, 2 arms,
+-- 2 legs) so each player's screen can swing the arms and legs. Measured in studs from the hips.
+local GROUND_Y = HOME.Y + 0.1                -- top of the grass
+local HIP_HEIGHT = 2                         -- hips are this high off the grass
+local SHOULDER = Vector3.new(1.45, 1.75, 0)  -- right shoulder (the left one is the mirror image)
+local HIP = Vector3.new(0.5, 0, 0)           -- right hip
+local DIVE_TIME = 0.35   -- a dive takes this long, from leaving the ground to the catch
+local DIVE_GLOVE = 4     -- lying flat after a dive, the glove is this far past the hips
+local CATCH_REACH = 1.5  -- a fielder can reach this far for a catch without diving
+local RETURN_SPEED = 14  -- jogging back to their spot after a play
+local SINGLE_TIME = 2.6  -- a fielder who picks up the ball before this many seconds holds it to a single
+local DOUBLE_TIME = 3.1  -- ...before this many it's a double, after that it's a triple
 
 local GRASS = Color3.fromRGB(70, 135, 55)
 local GRASS_LIGHT = Color3.fromRGB(84, 152, 64)
@@ -192,6 +221,7 @@ remotes:SetAttribute("BatterUserId", 0)
 remotes:SetAttribute("BatterName", "")
 remotes:SetAttribute("Outs", 0)
 remotes:SetAttribute("Homers", 0)
+remotes:SetAttribute("Hits", 0)
 remotes:SetAttribute("Streak", 0)
 
 ---------------------------------------------------------------------
@@ -748,6 +778,109 @@ local function buildField()
 end
 
 local board, leaderBoard, machineScreen, batBeam, batSign = buildField()
+
+---------------------------------------------------------------------
+-- The outfielders (the red VISITORS team). The server builds them standing at their spots.
+-- Every player's screen moves them (run, catch, dive, throw) using the plan sent with each hit.
+---------------------------------------------------------------------
+local fielderHomes = {} -- [index] = the spot on the grass where that fielder waits
+
+local function buildFielders()
+	local field = workspace:FindFirstChild("BaseballField")
+	local folder = Instance.new("Folder")
+	folder.Name = "Fielders"
+	local leather = Color3.fromRGB(125, 72, 35)
+	local pants = Color3.fromRGB(236, 236, 228)
+
+	for index, spot in FIELDER_SPOTS do
+		local grass = fieldPoint(spot.deg, spot.dist)
+		local home = Vector3.new(grass.X, GROUND_Y, grass.Z)
+		fielderHomes[index] = home
+
+		local model = Instance.new("Model")
+		model.Name = spot.name
+		model:SetAttribute("Index", index)
+		model:SetAttribute("Home", home)
+		model:SetAttribute("HipHeight", HIP_HEIGHT)
+		model:SetAttribute("Shoulder", SHOULDER)
+		model:SetAttribute("Hip", HIP)
+		local skin = SKIN_COLORS[math.random(1, #SKIN_COLORS)]
+
+		-- Standing at their spot, looking at home plate
+		local hips = CFrame.lookAt(home + Vector3.new(0, HIP_HEIGHT, 0), Vector3.new(HOME.X, GROUND_Y + HIP_HEIGHT, HOME.Z))
+		local pivots = {
+			Body = hips,
+			RightArm = hips * CFrame.new(SHOULDER),
+			LeftArm = hips * CFrame.new(-SHOULDER.X, SHOULDER.Y, SHOULDER.Z),
+			RightLeg = hips * CFrame.new(HIP),
+			LeftLeg = hips * CFrame.new(-HIP.X, HIP.Y, HIP.Z),
+		}
+		-- limb = which pivot the piece hangs from; offset = where it sits from that pivot
+		local function piece(name, limb, size, offset, color, material)
+			local p = Instance.new("Part")
+			p.Name = name
+			p.Anchored = true
+			p.CanCollide = false
+			p.CanQuery = false
+			p.CanTouch = false
+			p.Size = size
+			p.Color = color
+			p.Material = material or Enum.Material.SmoothPlastic
+			p.TopSurface = Enum.SurfaceType.Smooth
+			p.BottomSurface = Enum.SurfaceType.Smooth
+			p.CFrame = pivots[limb] * offset
+			p:SetAttribute("Limb", limb)
+			p:SetAttribute("Offset", offset)
+			p.Parent = model
+			partCount += 1
+			return p
+		end
+
+		local torso = piece("Torso", "Body", Vector3.new(2, 2, 1), CFrame.new(0, 1, 0), AWAY_RED)
+		piece("Belt", "Body", Vector3.new(2.04, 0.24, 1.04), CFrame.new(0, 0.12, 0), DARK)
+		local head = piece("Head", "Body", Vector3.new(1.2, 1.2, 1.2), CFrame.new(0, 2.62, 0), skin)
+		piece("Cap", "Body", Vector3.new(1.28, 0.42, 1.28), CFrame.new(0, 3.35, 0.02), AWAY_RED)
+		piece("Brim", "Body", Vector3.new(1.1, 0.12, 0.75), CFrame.new(0, 3.17, -0.95), AWAY_RED)
+		for _, side in { "Right", "Left" } do
+			piece(side .. "Arm", side .. "Arm", Vector3.new(0.9, 2, 0.9), CFrame.new(0, -0.75, 0), skin)
+			piece(side .. "Sleeve", side .. "Arm", Vector3.new(0.96, 0.8, 0.96), CFrame.new(0, -0.1, 0), AWAY_RED)
+			piece(side .. "Leg", side .. "Leg", Vector3.new(0.95, 2, 0.95), CFrame.new(0, -1, 0), pants)
+			piece(side .. "Sock", side .. "Leg", Vector3.new(0.98, 0.55, 0.98), CFrame.new(0, -1.5, 0), AWAY_RED)
+			piece(side .. "Shoe", side .. "Leg", Vector3.new(0.98, 0.35, 1.3), CFrame.new(0, -1.83, -0.17), DARK)
+		end
+		piece("Glove", "LeftArm", Vector3.new(1.1, 1.2, 0.55), CFrame.new(0, -1.85, -0.15), leather, Enum.Material.Fabric)
+
+		-- A face, and the number on the back and front of the jersey
+		local face = Instance.new("Decal")
+		face.Face = Enum.NormalId.Front
+		face.Texture = "rbxasset://textures/face.png"
+		face.Parent = head
+		for _, side in { Enum.NormalId.Back, Enum.NormalId.Front } do
+			local gui = Instance.new("SurfaceGui")
+			gui.Face = side
+			gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+			gui.PixelsPerStud = 40
+			local label = Instance.new("TextLabel")
+			label.AnchorPoint = Vector2.new(0.5, 0.5)
+			label.Position = UDim2.new(0.5, 0, 0.45, 0)
+			label.Size = if side == Enum.NormalId.Back then UDim2.new(0.8, 0, 0.7, 0) else UDim2.new(0.4, 0, 0.35, 0)
+			label.BackgroundTransparency = 1
+			label.Font = Enum.Font.LuckiestGuy
+			label.TextScaled = true
+			label.TextColor3 = WHITE
+			label.Text = tostring(spot.number)
+			label.Parent = gui
+			gui.Parent = torso
+		end
+
+		model.ModelStreamingMode = Enum.ModelStreamingMode.Persistent -- every player always gets the fielders
+		model.Parent = folder
+	end
+	folder.Parent = field
+end
+if FIELDERS_ON then
+	buildFielders()
+end
 print(string.format("[Baseball] Stadium built with %d parts", partCount))
 
 local function setScreen(name, speed, info, color)
@@ -889,6 +1022,7 @@ end
 local batter = nil        -- the Player who is batting right now
 local outs = 0
 local homers = 0
+local hits = 0            -- balls that dropped in for singles, doubles, and triples
 local streak = 0          -- home runs in a row
 local roundEarned = 0
 local roundLongest = 0
@@ -906,9 +1040,10 @@ local function updateScoreboard()
 	remotes:SetAttribute("BatterName", batter and batter.DisplayName or "")
 	remotes:SetAttribute("Outs", outs)
 	remotes:SetAttribute("Homers", homers)
+	remotes:SetAttribute("Hits", hits)
 	remotes:SetAttribute("Streak", streak)
 	board.batter.Text = batter and ("AT BAT: " .. string.upper(batter.DisplayName)) or "STEP UP TO BAT!"
-	board.stats.Text = string.format("HR %d     OUTS %d/%d", homers, outs, MAX_OUTS)
+	board.stats.Text = string.format("HR %d   HITS %d   OUTS %d/%d", homers, hits, outs, MAX_OUTS)
 	batBeam.Transparency = if batter then 1 else 0.82
 	batSign.Enabled = batter == nil
 end
@@ -965,11 +1100,13 @@ local function addOut(plr)
 				kind = "ROUNDOVER",
 				text = string.format("ROUND OVER! %d HOME RUN%s", homers, homers == 1 and "" or "S"),
 				homers = homers,
+				hits = hits,
 				longest = roundLongest,
 				earned = roundEarned,
 			})
 			outs = 0
 			homers = 0
+			hits = 0
 			streak = 0
 			roundEarned = 0
 			roundLongest = 0
@@ -1031,6 +1168,7 @@ local function computeHit(offset, bat)
 		distance = math.floor(carry * FEET_PER_STUD),
 		exitVelo = math.floor(rawSpeed * bat.power * POWER * EXIT_VELO_PER_SPEED + 0.5),
 		launchDeg = math.floor(launchDeg + 0.5),
+		fence = fence,
 	}
 
 	if math.abs(sprayDeg) > 45 then
@@ -1063,6 +1201,225 @@ local function computeHit(offset, bat)
 		hit.kind = "OUT"
 	end
 	return hit, quality
+end
+
+---------------------------------------------------------------------
+-- The outfielders go get the ball
+---------------------------------------------------------------------
+local CUTOFF = HOME + Vector3.new(0, 4, -2 * BASE_DIST / math.sqrt(2)) -- they throw the ball back in to second base
+local fielderPlays = {} -- [index] = { plan = that fielder's last play, start = os.clock() when that ball was hit }
+
+-- How high a ball can be for each kind of catch, and how close the fielder has to get.
+-- They're tried in this order, so a fielder makes an easy catch whenever he can.
+local CATCH_KINDS = {
+	{ kind = "CATCH", low = 1.2, high = 5, reach = CATCH_REACH },
+	{ kind = "CATCH", low = 5, high = 6.3, reach = CATCH_REACH },
+	{ kind = "LEAP", low = 6.3, high = 10.3, reach = CATCH_REACH },
+	{ kind = "SHOESTRING", low = 0.3, high = 1.2, reach = CATCH_REACH },
+	{ kind = "DIVE", low = 0.3, high = 3.5, reach = DIVE_REACH, extra = DIVE_TIME },
+}
+
+-- Where the ball is, t seconds after it was hit
+local function ballAt(hit, t)
+	return hit.launchPos + hit.velocity * t + Vector3.new(0, -0.5 * hit.gravity * t * t, 0)
+end
+
+-- How far something is from home plate, along the ground
+local function flatDistance(pos)
+	return Vector3.new(pos.X - HOME.X, 0, pos.Z - HOME.Z).Magnitude
+end
+
+local function onGrass(pos)
+	return Vector3.new(pos.X, GROUND_Y, pos.Z)
+end
+
+-- Where a fielder is standing, t seconds into a play.
+-- (Every player's screen does the same math in BaseballClient, so keep the two the same.)
+local function fielderSpotAt(plan, t)
+	if t < plan.runAt then
+		return plan.from
+	elseif t < plan.arriveAt then
+		return plan.from:Lerp(plan.runTo, (t - plan.runAt) / (plan.arriveAt - plan.runAt))
+	elseif plan.diveAt and t < plan.actAt then
+		return plan.runTo:Lerp(plan.diveTo, math.clamp((t - plan.diveAt) / (plan.actAt - plan.diveAt), 0, 1))
+	elseif t < plan.backAt then
+		return plan.standAt
+	elseif t < plan.homeAt then
+		return plan.standAt:Lerp(plan.home, (t - plan.backAt) / (plan.homeAt - plan.backAt))
+	end
+	return plan.home
+end
+
+local function fielderSpotNow(index, now)
+	local play = fielderPlays[index]
+	if not play then
+		return fielderHomes[index]
+	end
+	return fielderSpotAt(play.plan, now - play.start)
+end
+
+-- Can anybody catch it? Walks along the ball's flight looking for a spot a fielder can get to in time.
+-- Returns the fielder, the time, where the ball is, and what kind of catch it is (or nil).
+local function findCatch(hit, spots)
+	local lastT = hit.flightTime
+	for _, try in CATCH_KINDS do
+		local t = FIELDER_REACTION
+		while t <= lastT do
+			local pos = ballAt(hit, t)
+			local dist = flatDistance(pos)
+			if dist >= INFIELD_DIST and dist <= hit.fence - 1.5 and pos.Y >= try.low and pos.Y <= try.high then
+				local best, bestDist = nil, math.huge
+				for index, spot in spots do
+					local d = (onGrass(pos) - spot).Magnitude
+					local timeNeeded = FIELDER_REACTION + (try.extra or 0) + math.max(0, d - try.reach) / FIELDER_SPEED
+					if timeNeeded <= t and d < bestDist then
+						best, bestDist = index, d
+					end
+				end
+				if best then
+					return best, t, pos, try.kind
+				end
+			end
+			t += 1 / 60
+		end
+	end
+	return nil
+end
+
+local function newPlan(index, from)
+	return { index = index, from = from, runAt = FIELDER_REACTION, home = fielderHomes[index] }
+end
+
+-- The plan for catching the ball at catchPos, t seconds after the hit
+local function catchPlan(index, from, t, catchPos, kind)
+	local plan = newPlan(index, from)
+	local target = onGrass(catchPos)
+	local d = (target - from).Magnitude
+	local dir = if d > 0.01 then (target - from) / d else Vector3.new(0, 0, 1)
+	plan.action = kind
+	plan.actAt = t
+	plan.ballPos = catchPos
+	if kind == "DIVE" then
+		-- Sprint, then fly through the air and land on his belly with the glove out in front
+		plan.diveTo = target - dir * DIVE_GLOVE
+		plan.diveAt = t - DIVE_TIME
+		local runDist = math.clamp(FIELDER_SPEED * (plan.diveAt - FIELDER_REACTION), 0, math.max(0, d - DIVE_GLOVE - 2))
+		plan.runTo = from + dir * runDist
+		plan.arriveAt = FIELDER_REACTION + runDist / FIELDER_SPEED
+		plan.standAt = plan.diveTo
+		plan.throwAt = t + 1.4 -- lie there a second, hop up, then throw
+	else
+		-- Stop just short of the ball and reach for it with the glove
+		local runDist = math.max(0, d - CATCH_REACH)
+		plan.runTo = from + dir * runDist
+		plan.arriveAt = FIELDER_REACTION + runDist / FIELDER_SPEED
+		plan.standAt = plan.runTo
+		plan.throwAt = t + 0.75
+	end
+	return plan
+end
+
+-- The plan for running down a ball that dropped in, and picking it up once it stops
+local function pickupPlan(index, from, restPos, restTime)
+	local plan = newPlan(index, from)
+	local target = onGrass(restPos)
+	local d = (target - from).Magnitude
+	local runDist = math.max(0, d - 1.4)
+	plan.action = "FIELD"
+	plan.runTo = if d > 0.01 then from + (target - from) / d * runDist else from
+	plan.arriveAt = FIELDER_REACTION + runDist / FIELDER_SPEED
+	plan.actAt = math.max(plan.arriveAt + 0.15, restTime + 0.1)
+	plan.ballPos = restPos
+	plan.standAt = plan.runTo
+	plan.throwAt = plan.actAt + 0.55
+	return plan
+end
+
+-- How the ball bounces once after it comes down (off the wall it bounces back), and where it stops.
+-- Every player's screen uses these numbers to draw the bounce.
+local function addBounce(hit)
+	local T = hit.flightTime
+	local g = hit.gravity
+	local landPos = ballAt(hit, T)
+	local landVel = hit.velocity + Vector3.new(0, -g * T, 0)
+	local bounceVel, bounceTime
+	if hit.kind == "WALL" then
+		bounceVel = Vector3.new(-landVel.X * 0.25, math.max(math.abs(landVel.Y) * 0.3, 6), -landVel.Z * 0.25)
+		bounceTime = (bounceVel.Y + math.sqrt(bounceVel.Y * bounceVel.Y + 2 * g * math.max(landPos.Y - 0.45, 0))) / g
+	else
+		bounceVel = Vector3.new(landVel.X * 0.3, math.abs(landVel.Y) * 0.3, landVel.Z * 0.3)
+		bounceTime = 2 * bounceVel.Y / g
+		-- Don't bounce through the outfield wall
+		-- (if it landed right next to the wall, it bounces back off it a little)
+		local roll = Vector3.new(bounceVel.X, 0, bounceVel.Z) * bounceTime
+		local room = hit.fence - 2 - flatDistance(landPos)
+		if roll.Magnitude > room and roll.Magnitude > 0 then
+			local shrink = math.clamp(room / roll.Magnitude, -1, 1)
+			bounceVel = Vector3.new(bounceVel.X * shrink, bounceVel.Y, bounceVel.Z * shrink)
+		end
+	end
+	hit.bounceVel = bounceVel
+	hit.bounceTime = bounceTime
+	local restPos = landPos + bounceVel * bounceTime + Vector3.new(0, -0.5 * g * bounceTime * bounceTime, 0)
+	return restPos, T + bounceTime
+end
+
+-- Sends an outfielder after a ball that stays in the park. Afterward:
+--   caught:  hit.kind = "OUT", and hit.caught = "CATCH", "LEAP", "SHOESTRING", or "DIVE"
+--   dropped: hit.hitType = "SINGLE", "DOUBLE", or "TRIPLE" (hit.kind = "HIT", or "WALL" off the wall)
+-- hit.fielding is the plan every player's screen uses to move that fielder.
+local function playDefense(hit)
+	if not FIELDERS_ON or #fielderHomes == 0 or (hit.kind ~= "OUT" and hit.kind ~= "WALL") then
+		return
+	end
+	if hit.kind == "OUT" and flatDistance(ballAt(hit, hit.flightTime)) < INFIELD_DIST then
+		return -- the infield catches this one
+	end
+	local now = os.clock()
+	local spots = {}
+	for index in fielderHomes do
+		spots[index] = fielderSpotNow(index, now)
+	end
+
+	local plan
+	local catcher, t, catchPos, catchKind = findCatch(hit, spots)
+	if catcher then
+		plan = catchPlan(catcher, spots[catcher], t, catchPos, catchKind)
+		hit.kind = "OUT"
+		hit.caught = catchKind
+		hit.atWall = flatDistance(catchPos) > hit.fence - 8
+		hit.flightTime = t
+		hit.distance = math.floor(flatDistance(catchPos) * FEET_PER_STUD)
+	else
+		-- It drops in! Whoever can get to it first goes and picks it up.
+		local restPos, restTime = addBounce(hit)
+		local chaser, chaserTime = 1, math.huge
+		for index, spot in spots do
+			local arrive = FIELDER_REACTION + math.max(0, (onGrass(restPos) - spot).Magnitude - 1.4) / FIELDER_SPEED
+			if arrive < chaserTime then
+				chaser, chaserTime = index, arrive
+			end
+		end
+		plan = pickupPlan(chaser, spots[chaser], restPos, restTime)
+		if plan.actAt < SINGLE_TIME and hit.kind ~= "WALL" then
+			hit.hitType = "SINGLE"
+		elseif plan.actAt < DOUBLE_TIME then
+			hit.hitType = "DOUBLE"
+		else
+			hit.hitType = "TRIPLE"
+		end
+		if hit.kind ~= "WALL" then
+			hit.kind = "HIT"
+		end
+	end
+
+	-- Throw it back in to second base, then jog back to his spot
+	plan.throwTo = CUTOFF
+	plan.throwTime = math.clamp((CUTOFF - plan.standAt).Magnitude / 90, 0.5, 2.2)
+	plan.backAt = plan.throwAt + 0.5
+	plan.homeAt = plan.backAt + (plan.home - plan.standAt).Magnitude / RETURN_SPEED
+	fielderPlays[plan.index] = { plan = plan, start = now }
+	hit.fielding = plan
 end
 
 ---------------------------------------------------------------------
@@ -1114,6 +1471,7 @@ local function setBatter(plr)
 	roundId += 1
 	outs = 0
 	homers = 0
+	hits = 0
 	streak = 0
 	roundEarned = 0
 	roundLongest = 0
@@ -1138,6 +1496,7 @@ local function clearBatter()
 	end
 	outs = 0
 	homers = 0
+	hits = 0
 	streak = 0
 	setScreen("ROBO-PITCHER", "READY", "STEP INTO THE BOX!")
 	updateScoreboard()
@@ -1263,11 +1622,18 @@ SwingEvent.OnServerEvent:Connect(function(plr, pitchId, offset)
 	hit.golden = p.golden
 	local perfect = quality > 0.9
 	hit.perfect = perfect
+	playDefense(hit) -- the outfielders go after it
 
 	local reward = REWARD_CONTACT
 	if hit.kind == "HOMER" then
 		streak += 1
 		reward = REWARD_HOMER + REWARD_STREAK * (streak - 1)
+	elseif hit.hitType == "SINGLE" then
+		reward = REWARD_SINGLE
+	elseif hit.hitType == "DOUBLE" then
+		reward = REWARD_DOUBLE
+	elseif hit.hitType == "TRIPLE" then
+		reward = REWARD_TRIPLE
 	elseif hit.kind == "WALL" then
 		reward = REWARD_WALL
 	end
@@ -1304,19 +1670,66 @@ SwingEvent.OnServerEvent:Connect(function(plr, pitchId, offset)
 		updateScoreboard()
 		sendResult(hit)
 	else
-		if hit.kind == "FOUL" then
-			hit.text = "FOUL BALL - out"
-			board.last.Text = "LAST HIT: FOUL"
-		elseif hit.kind == "WALL" then
-			hit.text = "OFF THE WALL! So close - out"
-			board.last.Text = "LAST HIT: OFF THE WALL"
+		local fielder = hit.fielding and FIELDER_SPOTS[hit.fielding.index]
+		local lastHit
+		if hit.hitType then
+			-- It dropped in: a hit, not an out!
+			hit.text = string.format("%s%s to %s!", if hit.kind == "WALL" then "OFF THE WALL! " else "", hit.hitType, fielder.field)
+			lastHit = "LAST HIT: " .. hit.hitType
+			nextPitchAt = os.clock() + math.max(3, math.min(hit.fielding.actAt, 6) + 1.2)
 		else
-			hit.text = string.format("Caught at %d FT - out", hit.distance)
-			board.last.Text = string.format("LAST HIT: %d FT", hit.distance)
+			if hit.kind == "FOUL" then
+				hit.text = "FOUL BALL - out"
+				lastHit = "LAST HIT: FOUL"
+			elseif fielder then
+				local how = if hit.caught == "DIVE" then "DIVING CATCH"
+					elseif hit.atWall then "CAUGHT AT THE WALL"
+					elseif hit.caught == "LEAP" then "LEAPING CATCH"
+					elseif hit.caught == "SHOESTRING" then "SHOESTRING CATCH"
+					else nil
+				if how then
+					hit.text = string.format("%s by the %s! - out", how, fielder.title)
+					lastHit = "LAST HIT: " .. how
+				else
+					hit.text = string.format("Caught by the %s at %d FT - out", fielder.title, hit.distance)
+					lastHit = string.format("LAST HIT: %d FT FLY OUT", hit.distance)
+				end
+			elseif hit.kind == "WALL" then
+				hit.text = "OFF THE WALL! So close - out"
+				lastHit = "LAST HIT: OFF THE WALL"
+			else
+				hit.text = string.format("Caught at %d FT - out", hit.distance)
+				lastHit = string.format("LAST HIT: %d FT", hit.distance)
+			end
+			-- (a fielder's catch gets an extra second so everyone can watch it)
+			nextPitchAt = os.clock() + math.max(2.5, math.min(hit.flightTime, 6) + (if fielder then 1.6 else 0.8))
 		end
-		nextPitchAt = os.clock() + math.max(2.5, math.min(hit.flightTime, 6) + 0.8)
+
+		-- No spoilers: when a fielder is chasing it, the scoreboard waits until the ball is caught or drops
+		hit.revealAt = if not fielder then 0 elseif hit.hitType then hit.flightTime else hit.fielding.actAt
 		sendResult(hit)
-		addOut(plr)
+		local thisRound = roundId
+		local function countIt()
+			if batter ~= plr or roundId ~= thisRound then
+				return -- they left the box (or the round restarted) while the ball was in the air
+			end
+			board.last.Text = lastHit
+			if hit.hitType then
+				hits += 1
+				streak = 0
+				if hit.hitType == "TRIPLE" then
+					flashBoard("TRIPLE!!!", Color3.fromRGB(90, 220, 255))
+				end
+				updateScoreboard()
+			else
+				addOut(plr)
+			end
+		end
+		if hit.revealAt > 0 then
+			task.delay(hit.revealAt, countIt)
+		else
+			countIt()
+		end
 	end
 end)
 

@@ -1,9 +1,9 @@
 --[[
 	BaseballClient  (LocalScript in StarterPlayer > StarterPlayerScripts)
-	Warren's Home Run Derby, version 4.
+	Warren's Home Run Derby, version 5.
 	Draws the balls, swings the bat (full body: stride, hip turn, back-foot pivot, two hands
 	on the bat), runs the camera, the shop, the baseball counter, the ROBO-PITCHER arm,
-	the crowd, and the HOMERUNNNN show.
+	the outfielders (run, catch, dive, throw), the crowd, and the HOMERUNNNN show.
 	Knows if you're on a computer, a phone/tablet, or a console and sets the controls to match.
 ]]
 
@@ -371,12 +371,14 @@ modeBadge.TextScaled = true
 modeBadge.TextColor3 = Color3.new(1, 1, 1)
 modeBadge.BackgroundTransparency = 0.15
 addCorner(modeBadge, UDim.new(1, 0))
-local badgePad = Instance.new("UIPadding")
-badgePad.PaddingTop = UDim.new(0, 5)
-badgePad.PaddingBottom = UDim.new(0, 5)
-badgePad.PaddingLeft = UDim.new(0, 10)
-badgePad.PaddingRight = UDim.new(0, 10)
-badgePad.Parent = modeBadge
+do -- (setup-only pieces go inside do...end so they don't use up the script's 200 local variables)
+	local badgePad = Instance.new("UIPadding")
+	badgePad.PaddingTop = UDim.new(0, 5)
+	badgePad.PaddingBottom = UDim.new(0, 5)
+	badgePad.PaddingLeft = UDim.new(0, 10)
+	badgePad.PaddingRight = UDim.new(0, 10)
+	badgePad.Parent = modeBadge
+end
 modeBadge.Parent = root
 
 -- Controls help at the bottom
@@ -397,15 +399,17 @@ counter.Parent = root
 local counterScale = Instance.new("UIScale")
 counterScale.Parent = counter
 
-local ballIcon = Instance.new("Frame")
-ballIcon.AnchorPoint = Vector2.new(0, 0.5)
-ballIcon.Size = UDim2.new(0, 32, 0, 32)
-ballIcon.Position = UDim2.new(0, 8, 0.5, 0)
-ballIcon.BackgroundColor3 = Color3.fromRGB(250, 250, 245)
-addCorner(ballIcon, UDim.new(1, 0))
-local stitches = addStroke(ballIcon, 3)
-stitches.Color = Color3.fromRGB(220, 40, 40)
-ballIcon.Parent = counter
+do
+	local ballIcon = Instance.new("Frame")
+	ballIcon.AnchorPoint = Vector2.new(0, 0.5)
+	ballIcon.Size = UDim2.new(0, 32, 0, 32)
+	ballIcon.Position = UDim2.new(0, 8, 0.5, 0)
+	ballIcon.BackgroundColor3 = Color3.fromRGB(250, 250, 245)
+	addCorner(ballIcon, UDim.new(1, 0))
+	local stitches = addStroke(ballIcon, 3)
+	stitches.Color = Color3.fromRGB(220, 40, 40)
+	ballIcon.Parent = counter
+end
 
 local countLabel = makeLabel(counter, "Count", UDim2.new(1, -58, 0.75, 0), UDim2.new(0, 50, 0.5, 0), Enum.Font.LuckiestGuy, 32)
 countLabel.AnchorPoint = Vector2.new(0, 0.5)
@@ -520,9 +524,11 @@ roundPanel.Visible = false
 addCorner(roundPanel, UDim.new(0, 18))
 addStroke(roundPanel, 3).Color = GOLD
 roundPanel.Parent = root
-local roundTitle = makeLabel(roundPanel, "Title", UDim2.new(0.9, 0, 0, 50), UDim2.new(0.5, 0, 0, 40), Enum.Font.LuckiestGuy)
-roundTitle.Text = "ROUND OVER!"
-roundTitle.TextColor3 = GOLD
+do
+	local roundTitle = makeLabel(roundPanel, "Title", UDim2.new(0.9, 0, 0, 50), UDim2.new(0.5, 0, 0, 40), Enum.Font.LuckiestGuy)
+	roundTitle.Text = "ROUND OVER!"
+	roundTitle.TextColor3 = GOLD
+end
 local roundLines = {}
 for i = 1, 3 do
 	roundLines[i] = makeLabel(roundPanel, "Line" .. i, UDim2.new(0.85, 0, 0, 34), UDim2.new(0.5, 0, 0, 85 + i * 42), Enum.Font.FredokaOne)
@@ -534,7 +540,7 @@ local roundToken = 0
 local function showRoundSummary(info)
 	roundToken += 1
 	local token = roundToken
-	roundLines[1].Text = string.format("HOME RUNS: %d", info.homers or 0)
+	roundLines[1].Text = string.format("HOME RUNS: %d     HITS: %d", info.homers or 0, info.hits or 0)
 	roundLines[2].Text = string.format("LONGEST: %s", (info.longest or 0) > 0 and (info.longest .. " FT") or "-")
 	roundLines[3].Text = string.format("BASEBALLS: +%d", info.earned or 0)
 	roundPanel.Visible = true
@@ -559,15 +565,19 @@ shopFrame.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
 shopFrame.Visible = false
 addCorner(shopFrame, UDim.new(0, 16))
 addStroke(shopFrame, 3).Color = Color3.fromRGB(80, 90, 130)
-local shopLimit = Instance.new("UISizeConstraint")
-shopLimit.MaxSize = Vector2.new(780, 560)
-shopLimit.Parent = shopFrame
+do
+	local shopLimit = Instance.new("UISizeConstraint")
+	shopLimit.MaxSize = Vector2.new(780, 560)
+	shopLimit.Parent = shopFrame
+end
 shopFrame.Parent = root
 
-local shopTitle = makeLabel(shopFrame, "Title", UDim2.new(0.5, 0, 0, 40), UDim2.new(0, 16, 0, 30), Enum.Font.LuckiestGuy, 40)
-shopTitle.AnchorPoint = Vector2.new(0, 0.5)
-shopTitle.TextXAlignment = Enum.TextXAlignment.Left
-shopTitle.Text = "BAT SHOP"
+do
+	local shopTitle = makeLabel(shopFrame, "Title", UDim2.new(0.5, 0, 0, 40), UDim2.new(0, 16, 0, 30), Enum.Font.LuckiestGuy, 40)
+	shopTitle.AnchorPoint = Vector2.new(0, 0.5)
+	shopTitle.TextXAlignment = Enum.TextXAlignment.Left
+	shopTitle.Text = "BAT SHOP"
+end
 
 local luckLabel = makeLabel(shopFrame, "Luck", UDim2.new(0.6, 0, 0, 22), UDim2.new(0, 16, 0, 62), nil, 20)
 luckLabel.AnchorPoint = Vector2.new(0, 0.5)
@@ -949,6 +959,7 @@ local function refreshHud()
 	local batterId = remotes:GetAttribute("BatterUserId") or 0
 	local outs = remotes:GetAttribute("Outs") or 0
 	local homers = remotes:GetAttribute("Homers") or 0
+	local hits = remotes:GetAttribute("Hits") or 0
 	local streak = remotes:GetAttribute("Streak") or 0
 	local maxOuts = remotes:GetAttribute("MaxOuts") or 10
 	local streakText = if streak >= 2 then string.format("   STREAK x%d!", streak) else ""
@@ -956,10 +967,10 @@ local function refreshHud()
 		statusLabel.Text = "HOME RUN DERBY - walk into the glowing box to bat!"
 		pitchLabel.Text = ""
 	elseif batterId == player.UserId then
-		statusLabel.Text = string.format("OUTS %d/%d     HOME RUNS %d%s", outs, maxOuts, homers, streakText)
+		statusLabel.Text = string.format("OUTS %d/%d     HOME RUNS %d     HITS %d%s", outs, maxOuts, homers, hits, streakText)
 	else
-		statusLabel.Text = string.format("%s is batting - OUTS %d/%d   HOME RUNS %d%s",
-			remotes:GetAttribute("BatterName") or "Someone", outs, maxOuts, homers, streakText)
+		statusLabel.Text = string.format("%s is batting - OUTS %d/%d   HOME RUNS %d   HITS %d%s",
+			remotes:GetAttribute("BatterName") or "Someone", outs, maxOuts, homers, hits, streakText)
 	end
 end
 
@@ -1474,6 +1485,352 @@ RunService.RenderStepped:Connect(function()
 end)
 
 ---------------------------------------------------------------------
+-- The outfielders: they run, catch, dive, and throw. The server sends a plan with every
+-- ball they go after, and every player's screen moves them the same way.
+---------------------------------------------------------------------
+-- (It's all inside one function because a script can only have 200 local variables,
+-- and this one is almost full. Only startFielderPlay comes out.)
+local startFielderPlay = (function()
+	local RUN_STRIDE = 7      -- studs for two running steps
+	local READY_CROUCH = 0.2  -- how low they get while a pitch is on its way
+	local rad = math.rad
+
+	local fielders = {}      -- [index] = one fielder: model, pieces, where he waits, which way he faces
+	local fielderPlays = {}  -- [index] = { plan, start, ball } for the play that fielder is making
+	local lastFielderLookup = -99
+	local fieldersReady = 0  -- 1 while a pitch is on its way (everybody gets in ready position)
+
+	local function findFielders()
+		stadium = stadium or workspace:FindFirstChild("BaseballField")
+		local folder = stadium and stadium:FindFirstChild("Fielders")
+		if not folder then
+			return
+		end
+		for _, model in folder:GetChildren() do
+			local index = model:GetAttribute("Index")
+			local home = model:GetAttribute("Home")
+			if typeof(index) == "number" and typeof(home) == "Vector3" then
+				local pieces = {}
+				local gloveOffset = CFrame.new(0, -1.85, -0.15)
+				for _, part in model:GetChildren() do
+					local limb = part:GetAttribute("Limb")
+					local offset = part:GetAttribute("Offset")
+					if part:IsA("BasePart") and type(limb) == "string" and typeof(offset) == "CFrame" then
+						table.insert(pieces, { part = part, limb = limb, offset = offset })
+						if part.Name == "Glove" then
+							gloveOffset = offset
+						end
+					end
+				end
+				local old = fielders[index]
+				fielders[index] = {
+					model = model,
+					home = home,
+					hipHeight = model:GetAttribute("HipHeight") or 2,
+					shoulder = model:GetAttribute("Shoulder") or Vector3.new(1.45, 1.75, 0),
+					hip = model:GetAttribute("Hip") or Vector3.new(0.5, 0, 0),
+					gloveOffset = gloveOffset,
+					pieces = pieces,
+					facing = old and old.facing,
+					ready = old and old.ready or 0,
+				}
+			end
+		end
+	end
+
+	-- Where a fielder stands, t seconds into a play. (Same math as fielderSpotAt in BaseballServer.)
+	local function fielderSpotAt(plan, t)
+		if t < plan.runAt then
+			return plan.from
+		elseif t < plan.arriveAt then
+			return plan.from:Lerp(plan.runTo, (t - plan.runAt) / (plan.arriveAt - plan.runAt))
+		elseif plan.diveAt and t < plan.actAt then
+			return plan.runTo:Lerp(plan.diveTo, math.clamp((t - plan.diveAt) / (plan.actAt - plan.diveAt), 0, 1))
+		elseif t < plan.backAt then
+			return plan.standAt
+		elseif t < plan.homeAt then
+			return plan.standAt:Lerp(plan.home, (t - plan.backAt) / (plan.homeAt - plan.backAt))
+		end
+		return plan.home
+	end
+
+	-- Turns an arm that hangs straight down so it points at a spot in the world
+	local function pointArm(shoulderCF, target)
+		local dir = shoulderCF.Rotation:Inverse() * (target - shoulderCF.Position)
+		if dir.Magnitude < 0.01 then
+			return CFrame.identity
+		end
+		dir = dir.Unit
+		local down = Vector3.new(0, -1, 0)
+		local axis = down:Cross(dir)
+		if axis.Magnitude < 1e-4 then
+			return if dir.Y > 0 then CFrame.Angles(math.pi, 0, 0) else CFrame.identity
+		end
+		return CFrame.fromAxisAngle(axis.Unit, math.acos(math.clamp(down:Dot(dir), -1, 1)))
+	end
+
+	-- A quick up-and-down from 0 to 1 and back, centered on time 0
+	local function bump(t, before, after)
+		if t < 0 then
+			return smooth((t + before) / before)
+		end
+		return 1 - smooth(t / after)
+	end
+
+	-- How a fielder looks right now. Returns where his 5 pivots are (body, arms, legs),
+	-- and where a ball sits in his glove and in his throwing hand.
+	local function poseFielder(f, play, now, dt)
+		local plan = play and play.plan
+		local t = if play then now - play.start else 0
+		local active = plan ~= nil and t < plan.homeAt
+		local ground = f.home
+		local want = HOME - f.home       -- which way he wants to face (home plate)
+		local rise, lean = 0, 0           -- hips up (+) or down (-); lean forward (-) or back (+) in degrees
+		local spread = 0                  -- feet apart (degrees), for the ready crouch
+		local legL, legR = 0, 0           -- legs forward (+) or back (-), degrees
+		local armL = CFrame.Angles(rad(12), 0, rad(-10)) -- glove arm (left)
+		local armR = CFrame.Angles(rad(12), 0, rad(10))  -- throwing arm (right)
+		local reachFor, reach = nil, 0    -- reach the glove toward this spot (reach 0 to 1)
+		local runAmount, runPhase = 0, 0
+		local diving = false
+		local stepping = false            -- the legs are already set (the throw's step)
+
+		if not active then
+			-- Waiting at his spot. When a pitch is on its way: ready position!
+			f.ready += (fieldersReady - f.ready) * math.min(1, dt * 5)
+			rise = -READY_CROUCH * f.ready
+			lean = -14 * f.ready
+			armL = CFrame.Angles(rad(12 + 30 * f.ready), 0, rad(-10))
+			armR = CFrame.Angles(rad(12 + 30 * f.ready), 0, rad(10))
+		else
+			f.ready = 0
+			ground = fielderSpotAt(plan, t)
+			local toCatch = t - plan.actAt -- negative = the ball isn't there yet
+			if t >= plan.runAt and t < plan.arriveAt then
+				local run = plan.runTo - plan.from
+				want = run
+				runAmount = 1
+				runPhase = run.Magnitude * (t - plan.runAt) / (plan.arriveAt - plan.runAt) / RUN_STRIDE * 2 * math.pi
+			elseif t >= plan.backAt then
+				local back = plan.home - plan.standAt
+				want = back
+				runAmount = 0.6
+				runPhase = back.Magnitude * (t - plan.backAt) / (plan.homeAt - plan.backAt) / RUN_STRIDE * 2 * math.pi
+			elseif toCatch > 0.15 then
+				want = plan.throwTo - ground -- turn and throw it in
+			else
+				want = plan.ballPos - ground -- eyes on the ball
+				if Vector3.new(want.X, 0, want.Z).Magnitude < 0.5 then
+					want = HOME - ground
+				end
+			end
+
+			if plan.action == "DIVE" and plan.diveAt and t >= plan.diveAt and t < plan.actAt + 1 then
+				-- Fly through the air, land flat on his belly, then hop back up
+				diving = true
+				want = plan.diveTo - plan.runTo
+				local u = math.clamp((t - plan.diveAt) / (plan.actAt - plan.diveAt), 0, 1)
+				local down = if t < plan.actAt + 0.6 then smooth(u) else 1 - smooth((t - plan.actAt - 0.6) / 0.4)
+				lean = -85 * down
+				rise = (0.55 - f.hipHeight) * down + (if t < plan.actAt then math.sin(u * math.pi) * 0.9 else 0)
+				legL, legR = -12 * down, -25 * down
+				armL = CFrame.Angles(rad(12 + 158 * down), 0, rad(-10 + 6 * down))
+				armR = CFrame.Angles(rad(12 + 158 * down), 0, rad(10 - 6 * down))
+				runAmount = 0
+				-- reach for the ball, and keep the glove there a moment after the catch
+				reachFor = plan.ballPos
+				reach = if t < plan.actAt then smooth(u) else 1 - smooth((t - plan.actAt) / 0.4)
+			elseif plan.action == "FIELD" then
+				-- Bend down and scoop it up
+				if toCatch > -0.35 and toCatch < 0.25 then
+					local c = bump(toCatch, 0.35, 0.25)
+					rise, lean = -1 * c, -55 * c
+					reachFor, reach = plan.ballPos, c
+				end
+			elseif toCatch > -0.4 and toCatch < 0.4 then
+				-- Reach out for it, and keep the glove there a moment after the catch
+				reachFor, reach = plan.ballPos, bump(toCatch, 0.35, 0.3)
+				local height = plan.ballPos.Y - f.home.Y
+				local top = height - (f.hipHeight + f.shoulder.Y + 1.2) -- how high he has to jump
+				if top > 0 then
+					-- Jump up and snag it (a big jump for a LEAP, a little hop for a high one)
+					local u = (toCatch + 0.4) / 0.8
+					local jump = 4 * u * (1 - u)
+					rise = top * jump
+					legL, legR = 25 * jump, -10 * jump
+				elseif plan.action == "SHOESTRING" or height < 2.5 then
+					-- Get down low
+					local c = bump(toCatch, 0.35, 0.4)
+					local low = if plan.action == "SHOESTRING" then 1 else 0.6
+					rise, lean = -low * c, -50 * low * c
+				end
+			end
+
+			-- Got it: hold the glove up in front of his chest
+			if toCatch >= 0 and t < plan.throwAt - 0.35 and not diving then
+				armL = CFrame.Angles(rad(12), 0, rad(-10)):Lerp(CFrame.Angles(rad(75), 0, rad(25)), smooth(toCatch / 0.25))
+			end
+
+			-- The throw back in: wind up, step, and fire it over the top
+			local throwT = t - plan.throwAt
+			if throwT > -0.35 and throwT < 0.45 then
+				local angle
+				if throwT < -0.08 then
+					angle = -170 * smooth((throwT + 0.35) / 0.27)
+				elseif throwT < 0.12 then
+					angle = -170 - 130 * (throwT + 0.08) / 0.2
+				else
+					angle = 60 * (1 - smooth((throwT - 0.12) / 0.33))
+				end
+				armR = CFrame.Angles(rad(angle), 0, rad(8))
+				armL = CFrame.Angles(rad(85 - 55 * smooth(throwT / 0.2)), 0, rad(-5)) -- glove points at the target
+				local step = bump(throwT, 0.35, 0.45)
+				legL, legR = 22 * step, -22 * step
+				rise = -f.hipHeight * (1 - math.cos(rad(22 * step)))
+				lean = if throwT < 0 then 6 * step else -16 * step
+				stepping = true
+			end
+		end
+
+		-- The legs don't have knees, so to get down low he steps his feet apart
+		local bend = 0
+		if rise < 0 and not diving and not stepping then
+			bend = math.deg(math.acos(math.clamp(1 + rise / f.hipHeight, -1, 1)))
+		end
+		if runAmount > 0 then
+			-- Running: legs and arms swing, and the hips dip so a foot stays on the grass
+			local swing = math.sin(runPhase) * runAmount
+			local stride = 45 * swing + bend
+			legL, legR = legL + stride, legR - stride
+			armL = CFrame.Angles(rad(10 - 50 * swing), 0, rad(-8))
+			armR = CFrame.Angles(rad(10 + 50 * swing), 0, rad(8))
+			lean += -12 * runAmount
+			rise = math.max(rise, 0) - f.hipHeight * (1 - math.cos(rad(stride)))
+		elseif not active then
+			spread = bend -- the ready crouch: feet wide
+		else
+			legL, legR = legL + bend, legR - bend -- a lunge, glove foot forward
+		end
+
+		-- Turn smoothly toward where he wants to face
+		local flat = Vector3.new(want.X, 0, want.Z)
+		if flat.Magnitude > 0.01 then
+			flat = flat.Unit
+			if not f.facing or diving then
+				f.facing = flat
+			else
+				local turned = f.facing:Lerp(flat, math.min(1, dt * 10))
+				f.facing = if turned.Magnitude > 0.01 then turned.Unit else flat
+			end
+		end
+		local facing = f.facing or Vector3.new(0, 0, 1)
+
+		-- Leaning tips the whole body, legs too. Tip the legs back so the feet stay on the grass.
+		-- (Not in a dive: then he's flying, legs and all.)
+		if not diving then
+			legL, legR = legL - lean, legR - lean
+		end
+
+		local hipPos = ground + Vector3.new(0, f.hipHeight + rise, 0)
+		local hips = CFrame.lookAt(hipPos, hipPos + facing) * CFrame.Angles(rad(lean), 0, 0)
+		local sh, hp = f.shoulder, f.hip
+		local leftShoulder = hips * CFrame.new(-sh.X, sh.Y, sh.Z)
+		if reachFor and reach > 0 then
+			armL = armL:Lerp(pointArm(leftShoulder, reachFor), reach)
+		end
+		local frames = {
+			Body = hips,
+			LeftArm = leftShoulder * armL,
+			RightArm = hips * CFrame.new(sh.X, sh.Y, sh.Z) * armR,
+			LeftLeg = hips * CFrame.new(-hp.X, hp.Y, hp.Z) * CFrame.Angles(rad(legL), 0, rad(-spread)),
+			RightLeg = hips * CFrame.new(hp.X, hp.Y, hp.Z) * CFrame.Angles(rad(legR), 0, rad(spread)),
+		}
+		local glove = (frames.LeftArm * f.gloveOffset * CFrame.new(0, 0, -0.5)).Position
+		local hand = (frames.RightArm * CFrame.new(0, -1.95, 0)).Position
+		return frames, glove, hand
+	end
+
+	-- A fielder is going after this ball. He takes it once he catches it or picks it up.
+	local function startFielderPlay(plan, start, ball)
+		local old = fielderPlays[plan.index]
+		if old and old.ball and old.ball ~= ball then
+			old.ball:Destroy() -- he never finished the last play (that ball's gone now)
+		end
+		fielderPlays[plan.index] = { plan = plan, start = start, ball = ball }
+	end
+
+	local fielderParts, fielderCFrames = {}, {}
+	local warnedPose = false
+	RunService.RenderStepped:Connect(function(dt)
+		local now = os.clock()
+		if now - lastFielderLookup > 2 then
+			lastFielderLookup = now
+			findFielders()
+		end
+		local serverNow = workspace:GetServerTimeNow()
+		fieldersReady = if armPitch and serverNow > armPitch.startTime - PITCH_LEAD - 0.3
+			and serverNow < armPitch.startTime + 1.5 then 1 else 0
+
+		-- Move everybody
+		table.clear(fielderParts)
+		table.clear(fielderCFrames)
+		for index, f in fielders do
+			if f.model.Parent then
+				local ok, frames, glove, hand = pcall(poseFielder, f, fielderPlays[index], now, dt)
+				if ok then
+					f.glove, f.hand = glove, hand
+					for _, info in f.pieces do
+						local frame = frames[info.limb]
+						if frame then
+							table.insert(fielderParts, info.part)
+							table.insert(fielderCFrames, frame * info.offset)
+						end
+					end
+				elseif not warnedPose then
+					warnedPose = true -- (say it once, not every frame)
+					warn("[Baseball] The outfielders got stuck: " .. tostring(frames))
+				end
+			end
+		end
+		if #fielderParts > 0 then
+			pcall(function()
+				workspace:BulkMoveTo(fielderParts, fielderCFrames, Enum.BulkMoveMode.FireCFrameChanged)
+			end)
+		end
+
+		-- The ball, once a fielder has it: in the glove, into the throwing hand, then thrown to second base
+		for index, play in fielderPlays do
+			local plan = play.plan
+			local t = now - play.start
+			local ball = play.ball
+			if ball and ball.Parent and t >= plan.actAt then
+				local f = fielders[index]
+				local holding = plan.standAt + Vector3.new(0, 3.5, 0) -- (in case this screen can't see the fielder)
+				if t >= plan.throwAt + plan.throwTime then
+					ball:Destroy()
+					play.ball = nil
+				elseif t >= plan.throwAt then
+					play.releasePos = play.releasePos or (f and f.hand) or holding
+					local from = play.releasePos
+					local u = (t - plan.throwAt) / plan.throwTime
+					local arc = (plan.throwTo - from).Magnitude * 0.06
+					ball.Position = from:Lerp(plan.throwTo, u) + Vector3.new(0, 4 * arc * u * (1 - u), 0)
+				elseif t >= plan.throwAt - 0.3 then
+					ball.Position = (f and f.hand) or holding
+				else
+					ball.Position = (f and f.glove) or plan.ballPos
+				end
+			end
+			if t > plan.homeAt and not (play.ball and play.ball.Parent) then
+				fielderPlays[index] = nil
+			end
+		end
+	end)
+
+	return startFielderPlay
+end)()
+
+---------------------------------------------------------------------
 -- Balls
 ---------------------------------------------------------------------
 local balls = {} -- pitch id -> the ball for that pitch
@@ -1652,40 +2009,59 @@ local function flyBall(info)
 		followBall = ball
 	end
 
-	-- After it lands: one bounce (off the wall it bounces back), then it rests
+	-- After it lands: one bounce (off the wall it bounces back), then it rests.
+	-- (When an outfielder is chasing it, the server works out the bounce so he knows where it stops.)
 	local T = info.flightTime
 	local g = info.gravity
 	local landPos = info.launchPos + info.velocity * T + Vector3.new(0, -0.5 * g * T * T, 0)
-	local landVel = info.velocity + Vector3.new(0, -g * T, 0)
-	local bounceVel
-	if info.kind == "WALL" then
-		bounceVel = Vector3.new(-landVel.X * 0.25, math.max(math.abs(landVel.Y) * 0.3, 6), -landVel.Z * 0.25)
-	else
-		bounceVel = Vector3.new(landVel.X * 0.3, math.abs(landVel.Y) * 0.3, landVel.Z * 0.3)
-	end
-	local bounceTime = 2 * bounceVel.Y / g
-	if info.kind == "WALL" then
-		-- falls all the way down to the warning track
-		local h = landPos.Y - 0.45
-		bounceTime = (bounceVel.Y + math.sqrt(bounceVel.Y * bounceVel.Y + 2 * g * math.max(h, 0))) / g
+	local bounceVel, bounceTime = info.bounceVel, info.bounceTime
+	if typeof(bounceVel) ~= "Vector3" or type(bounceTime) ~= "number" then
+		local landVel = info.velocity + Vector3.new(0, -g * T, 0)
+		if info.kind == "WALL" then
+			bounceVel = Vector3.new(-landVel.X * 0.25, math.max(math.abs(landVel.Y) * 0.3, 6), -landVel.Z * 0.25)
+			-- falls all the way down to the warning track
+			local h = landPos.Y - 0.45
+			bounceTime = (bounceVel.Y + math.sqrt(bounceVel.Y * bounceVel.Y + 2 * g * math.max(h, 0))) / g
+		else
+			bounceVel = Vector3.new(landVel.X * 0.3, math.abs(landVel.Y) * 0.3, landVel.Z * 0.3)
+			bounceTime = 2 * bounceVel.Y / g
+		end
 	end
 
+	-- An outfielder is going after it: once he catches it (or picks it up), it's his
+	local plan = if type(info.fielding) == "table" then info.fielding else nil
 	local start = os.clock()
+	if plan then
+		startFielderPlay(plan, start, ball)
+	end
 	local conn
 	conn = RunService.RenderStepped:Connect(function()
 		local elapsed = os.clock() - start
-		if elapsed <= T then
-			ball.Position = info.launchPos + info.velocity * elapsed + Vector3.new(0, -0.5 * g * elapsed * elapsed, 0)
-		elseif info.kind ~= "FOUL" and elapsed <= T + bounceTime then
-			local b = elapsed - T
-			ball.Position = landPos + bounceVel * b + Vector3.new(0, -0.5 * g * b * b, 0)
+		if not ball.Parent then
+			conn:Disconnect() -- (a fielder threw it in, or a new play took over)
+			if followBall == ball then
+				followBall = nil
+			end
+			return
+		end
+		if not (plan and elapsed >= plan.actAt) then
+			if elapsed <= T then
+				ball.Position = info.launchPos + info.velocity * elapsed + Vector3.new(0, -0.5 * g * elapsed * elapsed, 0)
+			elseif info.kind ~= "FOUL" then
+				local b = math.min(elapsed - T, bounceTime)
+				ball.Position = landPos + bounceVel * b + Vector3.new(0, -0.5 * g * b * b, 0)
+			end
 		end
 		if mine and followBall == ball and elapsed > T + 0.3 then
 			followBall = nil
 			holdLookPos = ball.Position
 			holdLookUntil = os.clock() + 1.1
 		end
-		if elapsed > T + bounceTime + 1.5 then
+		if plan then
+			if elapsed > math.max(T + 0.3, plan.actAt) then
+				conn:Disconnect() -- the fielder has the ball now
+			end
+		elseif elapsed > T + bounceTime + 1.5 then
 			conn:Disconnect()
 			if followBall == ball then
 				followBall = nil
@@ -1822,6 +2198,7 @@ local RESULT_COLORS = {
 	FOUL = Color3.fromRGB(255, 160, 60),
 	WALL = Color3.fromRGB(255, 230, 90),
 	OUT = Color3.fromRGB(235, 235, 235),
+	HIT = Color3.fromRGB(110, 235, 120),
 	TAKE = Color3.fromRGB(180, 180, 180),
 	ROUNDOVER = Color3.fromRGB(90, 220, 255),
 }
@@ -1864,20 +2241,33 @@ ResultEvent.OnClientEvent:Connect(function(info)
 		local who = if mine then "" else info.batterName .. ":  "
 		showStats(string.format("%sEXIT VELO %d MPH  |  LAUNCH %d°  |  %d FT", who, info.exitVelo or 0, info.launchDeg or 0, info.distance or 0))
 	end
-	if mine and (info.earned or 0) > 0 then
-		showEarned(info.earned, info.lucky, info.golden)
-	end
-	if info.kind == "HOMER" then
-		celebrate(info)
-	else
+
+	-- When an outfielder is chasing it, wait until he catches it (or it drops) to say what happened
+	local function reveal()
+		if mine and (info.earned or 0) > 0 then
+			showEarned(info.earned, info.lucky, info.golden)
+		end
+		if info.kind == "HOMER" then
+			celebrate(info)
+			return
+		end
 		local text = info.text
 		if not mine and info.batterName ~= "" then
 			text = info.batterName .. ": " .. text
 		end
-		showMessage(text, RESULT_COLORS[info.kind] or Color3.new(1, 1, 1))
+		showMessage(text, if info.hitType then RESULT_COLORS.HIT else (RESULT_COLORS[info.kind] or Color3.new(1, 1, 1)))
 		if info.kind == "ROUNDOVER" and mine then
 			showRoundSummary(info)
 		end
+		-- The crowd goes wild for a great catch (or a triple)
+		if info.caught == "DIVE" or info.caught == "LEAP" or info.atWall or info.hitType == "TRIPLE" then
+			startCheer(2.5, if type(info.fielding) == "table" then info.fielding.ballPos else nil)
+		end
+	end
+	if type(info.revealAt) == "number" and info.revealAt > 0 then
+		task.delay(info.revealAt, reveal)
+	else
+		reveal()
 	end
 end)
 
